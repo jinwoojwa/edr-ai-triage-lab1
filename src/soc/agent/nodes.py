@@ -41,10 +41,11 @@ def _ids(obj) -> list[str]:
 # ---------------------------------------------------------------------------- 조사
 def investigate(state: TriageState) -> dict:
     """조사 노드: LLM이 🔍 조사 도구 중 무엇을 부를지 정합니다."""
-    # TODO[AG-1]: telemetry_tools()를 LLM에 연결(bind_tools)하고, 시스템 프롬프트 + 대화(messages)로 호출합니다.
-    # 첫 호출이면 대화가 비어 있으니 알림 메시지(_alert_message)를 먼저 넣습니다.
-    # 돌려줄 것: 새 메시지들, trace ["조사"], usage (usage_of(응답))
-    raise NotImplementedError("TODO[AG-1]")
+    history = list(state.get("messages", []))
+    initial = [_alert_message(state["alert"])] if not history else []
+    llm = get_llm().bind_tools(telemetry_tools())
+    response = llm.invoke([SystemMessage(content=prompt("investigate"))] + history + initial)
+    return {"messages": initial + [response], "trace": ["조사"], "usage": usage_of(response)}
 
 
 def run_tools(state: TriageState) -> dict:
@@ -113,10 +114,16 @@ def after_guardrail(state: TriageState) -> str:
 def recommend(state: TriageState) -> dict:
     """권고 노드: 📘 플레이북 검색으로 근거를 찾고, LLM이 조치를 권고합니다."""
     v, alert = state["verdict"], state["alert"]
-    # TODO[AG-2]: search_playbook_fn()으로 플레이북을 검색합니다. 질문은 알림 제목과 판정(기법)으로 만들고,
-    # 판정과 검색 결과를 LLM에 넘겨 Recommendation 형식으로 권고를 받습니다.
-    # 돌려줄 것: playbook(검색 결과), recommendation(dict), trace ["권고"], usage
-    raise NotImplementedError("TODO[AG-2]")
+    query = " ".join(filter(None, [alert.get("title", ""), v["verdict"],
+                                   " ".join(v.get("techniques", [])), "대응 조치 승인권자"]))
+    playbook = search_playbook_fn()(query, k=3)
+    context = {"alert": alert, "verdict": v, "playbook": playbook}
+    messages = [SystemMessage(content=prompt("recommend")),
+                HumanMessage(content="다음 근거로 권고하세요.\n```json\n"
+                             + json.dumps(context, ensure_ascii=False, default=str) + "\n```")]
+    out = get_llm().with_structured_output(Recommendation, include_raw=True).invoke(messages)
+    return {"playbook": playbook, "recommendation": out["parsed"].model_dump(),
+            "trace": ["권고"], "usage": usage_of(out["raw"])}
 
 
 # ---------------------------------------------------------------------------- 사람 승인 (2일차, 운전 🔍)
