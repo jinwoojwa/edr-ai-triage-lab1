@@ -1,0 +1,85 @@
+# 인프라 0단계: 내 PC에서 OpenSearch와 Postgres를 띄웁니다. (docs/guide/INFRA_STAGES.md)
+#
+#   docker compose up -d                  # OpenSearch, Dashboards, Postgres
+#   docker compose --profile app up -d --build   # 앱(API)까지 (선택)
+#   docker compose down                   # 끄기 (볼륨은 남음)
+#   docker compose down -v                # 끄고 데이터까지 삭제
+#
+# 비밀번호는 이 파일이 아니라 .env에서 읽습니다 (cp .env.example .env).
+#
+# [Windows] OpenSearch가 바로 종료되면 WSL2의 vm.max_map_count가 낮은 것입니다. PowerShell에서:
+#   wsl -d docker-desktop sysctl -w vm.max_map_count=262144
+# [macOS] Docker Desktop의 VM은 기본값이 충분해서 따로 할 일이 없습니다.
+
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.19.0
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true          # 실습용: 보안 플러그인 끄기 (http, 인증 없음)
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - bootstrap.memory_lock=true
+      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g    # 힙 1GB (고정)
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    ports:
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  dashboards:
+    image: opensearchproject/opensearch-dashboards:2.19.0
+    environment:
+      - OPENSEARCH_HOSTS=["http://opensearch:9200"]
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+    ports:
+      - "127.0.0.1:5601:5601"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: soc
+      POSTGRES_DB: soc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?.env에 POSTGRES_PASSWORD를 설정하세요 (cp .env.example .env)}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U soc -d soc"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # (선택) 앱 컨테이너. --profile app 을 줄 때만 뜹니다.
+  # 컨테이너 안의 localhost는 자기 자신이라, 주소는 서비스 이름(opensearch, postgres)을 씁니다.
+  api:
+    profiles: ["app"]
+    build: .
+    environment:
+      BACKEND: real
+      OPENSEARCH_URL: http://opensearch:9200
+      POSTGRES_DSN: postgresql://soc:${POSTGRES_PASSWORD}@postgres:5432/soc
+      FAKE_LLM: ${FAKE_LLM:-true}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+volumes:
+  opensearch-data:
+  postgres-data:
