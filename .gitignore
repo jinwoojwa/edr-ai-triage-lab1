@@ -40,3 +40,5 @@ build/
 
 # 실습 중 생성되는 데이터
 data/sim.jsonl
+data/sim_labels.jsonl
+data/eval/

@@ -1,0 +1,15 @@
+# 📘 kb-ingest Job 전용 이미지: Unstructured가 무거워서 앱 이미지와 분리합니다 (인프라 6단계).
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        poppler-utils tesseract-ocr tesseract-ocr-kor libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY requirements.txt requirements-kb.txt ./
+# hi_res용 torch는 CPU 전용 빌드를 먼저 설치합니다. 기본(GPU) 빌드는 이미지가 10GB를 넘습니다.
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir -r requirements-kb.txt
+COPY src ./src
+COPY data/kb ./data/kb
+ENV PYTHONPATH=/app/src
+CMD ["python", "-m", "soc.kb.ingest"]

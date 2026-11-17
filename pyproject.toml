@@ -1,0 +1,18 @@
+[project]
+name = "edr-ai-triage"
+version = "1.0.0"
+requires-python = ">=3.11"
+description = "EDR AI 트리아지 에이전트 실습 (2인 1조 · 3일)"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+filterwarnings = ["ignore::DeprecationWarning"]

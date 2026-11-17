@@ -1,0 +1,16 @@
+# 앱(API, 워커, 생성기, 에이전트) — 2026-11 제작 시 검증한 버전
+fastapi==0.163.*
+uvicorn[standard]==0.54.*
+httpx==0.28.*
+pydantic-settings==2.16.*
+python-dotenv==1.2.*
+langchain-core==1.8.*
+langchain-openai==1.8.*
+langgraph==1.2.*
+langgraph-checkpoint-postgres==3.2.*
+langsmith==0.14.*
+openai==3.*
+opensearch-py==3.2.*
+psycopg[binary]==3.3.*
+psycopg-pool==3.3.*
+pytest==9.*
