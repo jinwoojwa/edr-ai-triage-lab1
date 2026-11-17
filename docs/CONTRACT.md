@@ -8,10 +8,104 @@
 
 | 도구                                          | 만드는 사람 | 입력 | 출력 (꼭 있어야 하는 칸)               | 결과 개수 상한 | 실패하면 |
 | --------------------------------------------- | ----------- | ---- | -------------------------------------- | -------------- | -------- |
-| `get_process_tree(host, pid)`                 | 🔍          |      | `event_id`, …                          |                |          |
-| `get_process_activity(host, pid)`             | 🔍          |      | `event_id`, …                          |                |          |
-| `get_host_timeline(host, around_ts, minutes)` | 🔍          |      | `event_id`, …                          |                |          |
-| `search_playbook(query, k)`                   | 📘          |      | `text`, `source`(파일 이름), `page`, … |                |          |
+| `get_process_tree(host, pid)`                 | 🔍 좌진우 | host(호스트명), pid(조사할 프로세스 ID) | 프로세스별 기록 목록. 각 항목에 event_id, host, pid, ppid(부모 프로세스 ID), name(프로세스명), relationship(target·`parent`·`child`) | 부모 최대 5단계, 자식 최대 20건 | 대상 기록 없음: items=[], error=null. 부모 기록이 없으면 확인된 항목만 반환. 입력 오류·검색 장애: items=[], error에 오류 코드와 설명 |
+출력값 예시:
+{
+  "items": [
+    {
+      "event_id": "evt-00000022",
+      "host": "WS-007",
+      "pid": 19329,
+      "ppid": 8015,
+      "name": "cmd.exe",
+      "relationship": "parent"
+    },
+    {
+      "event_id": "evt-00000023",
+      "host": "WS-007",
+      "pid": 40702,
+      "ppid": 19329,
+      "name": "rundll32.exe",
+      "relationship": "target"
+    }
+  ],
+  "error": null
+}
+
+| `get_process_activity(host, pid)`             | 🔍 좌진우 | host(호스트명), pid(조사할 프로세스 ID) | 프로세스별 기록 목록. 각 항목에 event_id, ts(타임스탬프), host, pid, type(이벤트 종류), summary(원본 기록을 요약) | 최신 50건 | 활동 기록 없음: items=[], error=null. 입력 오류·검색 장애: items=[], error에 오류 코드와 설명 |
+출력값 예시:
+{
+  "items": [
+    {
+      "event_id": "evt-00000023",
+      "ts": "2026-11-16T09:12:02Z",
+      "host": "WS-007",
+      "pid": 40702,
+      "type": "process",
+      "summary": "rundll32.exe가 comsvcs.dll의 MiniDump 기능을 실행"
+    },
+    {
+      "event_id": "evt-00000024",
+      "ts": "2026-11-16T09:12:03Z",
+      "host": "WS-007",
+      "pid": 40702,
+      "type": "file",
+      "summary": "C:\\Windows\\Temp\\d.dmp 파일 생성"
+    }
+  ],
+  "error": null
+}
+
+| `get_host_timeline(host, around_ts, minutes)` | 🔍 좌진우 | host(호스트명), around_ts(검색 구간 기준 시각), minutes(기준시각 앞뒤 시각 몇 분인지) | 해당 호스트의 이벤트 목록. 각 항목에 event_id, ts(타임스탬프), host, type(이벤트 종류), summary(원본 기록을 요약) | 시간순 100건 | 해당 시간대 기록 없음: items=[], error=null. 시간 형식·`minutes` 오류 또는 검색 장애: items=[], error에 오류 코드와 설명 |
+출력값 예시:
+{
+  "items": [
+    {
+      "event_id": "evt-00000022",
+      "ts": "2026-11-16T09:12:01Z",
+      "host": "WS-007",
+      "type": "process",
+      "summary": "cmd.exe 실행"
+    },
+    {
+      "event_id": "evt-00000023",
+      "ts": "2026-11-16T09:12:02Z",
+      "host": "WS-007",
+      "type": "process",
+      "summary": "cmd.exe가 rundll32.exe를 실행해 MiniDump 기능 호출"
+    },
+    {
+      "event_id": "evt-00000024",
+      "ts": "2026-11-16T09:12:03Z",
+      "host": "WS-007",
+      "type": "file",
+      "summary": "C:\\Windows\\Temp\\d.dmp 파일 생성"
+    }
+  ],
+  "error": null
+}
+
+| `search_playbook(query, k)`                   | 📘 이동원 | `query`: 한국어 또는 영어 질문 문자열, `k`: 원하는 결과 개수(1~10) | `text`, `source`(PDF 파일명), `page`(1부터 시작), `score` | `k`건 | 관련 문서 없음: items=[], error=null. query·`k` 오류 또는 검색 장애: items=[], error에 오류 코드와 설명 |
+출력값 예시:
+출력값 예시:
+{
+  "items": [
+    {
+      "text": "호스트 격리 조치는 SOC 팀장 승인 후 진행한다.",
+      "source": "01_response_policy_tables.pdf",
+      "page": 2,
+      "score": 0.82
+    },
+    {
+      "text": "자격증명 덤프가 의심되면 호스트 격리와 추가 조사를 검토한다.",
+      "source": "02_playbook_credential_dump.pdf",
+      "page": 1,
+      "score": 0.71
+    }
+  ],
+  "error": null
+}
+
 
 ## 꼭 합의할 것
 
