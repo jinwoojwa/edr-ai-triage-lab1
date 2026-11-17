@@ -1,0 +1,42 @@
+# OS / 에디터
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+*.stackdump
+.idea/
+.vscode/
+
+# 강사용 (학생 배포 대상 아님)
+INSTRUCTOR_NEXT_STEPS.md
+instructor/
+
+# 비밀 정보 (키, 비밀번호는 환경변수나 secrets.sh로만)
+.env
+.env.*
+!.env.example
+*.pem
+kubeconfig
+*.kubeconfig
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# 실습 중 생성되는 데이터
+data/sim.jsonl
