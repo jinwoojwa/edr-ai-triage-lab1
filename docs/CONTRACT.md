@@ -8,8 +8,13 @@
 
 | 도구                                          | 만드는 사람 | 입력 | 출력 (꼭 있어야 하는 칸)               | 결과 개수 상한 | 실패하면 |
 | --------------------------------------------- | ----------- | ---- | -------------------------------------- | -------------- | -------- |
-| `get_process_tree(host, pid)`                 | 🔍 좌진우 | host(호스트명), pid(조사할 프로세스 ID) | 프로세스별 기록 목록. 각 항목에 event_id, host, pid, ppid(부모 프로세스 ID), name(프로세스명), relationship(target·`parent`·`child`) | 부모 최대 5단계, 자식 최대 20건 | 대상 기록 없음: items=[], error=null. 부모 기록이 없으면 확인된 항목만 반환. 입력 오류·검색 장애: items=[], error에 오류 코드와 설명 |
-출력값 예시:
+| `get_process_tree(host, pid)`                 | 🔍 좌진우 | host, pid | event_id, host, pid, ppid, name, relationship(target·`parent`·`child`) | 부모 최대 5단계, 자식 최대 20건 | 대상 기록 없음: items=[], error=null. 부모 기록이 없으면 확인된 항목만 반환. 입력 오류·검색 장애: items=[], error에 오류 코드와 설명 |
+| `get_process_activity(host, pid)`             | 🔍 좌진우 | host, pid | event_id, ts, host, pid, type, summary | 최신 50건 | 활동 기록 없음: items=[], error=null. 입력 오류·검색 장애: items=[], error에 오류 코드와 설명 |
+| `get_host_timeline(host, around_ts, minutes)` | 🔍 좌진우 | host, around_ts, minutes | event_id, ts, host, type, summary | 시간순 100건 | 해당 시간대 기록 없음: items=[], error=null. 시간 형식·`minutes` 오류 또는 검색 장애: items=[], error에 오류 코드와 설명 |
+| `search_playbook(query, k)`                   | 📘 이동원 | `query`: 한국어 또는 영어 질문 문자열, `k`: 원하는 결과 개수(1~10) | `text`, `source`(PDF 파일명), `page`(1부터 시작), `score` | `k`건 | 관련 문서 없음: items=[], error=null. query·`k` 오류 또는 검색 장애: items=[], error에 오류 코드와 설명 |
+
+### 출력값 예시:
+- get_process_tree
 {
   "items": [
     {
@@ -31,9 +36,7 @@
   ],
   "error": null
 }
-
-| `get_process_activity(host, pid)`             | 🔍 좌진우 | host(호스트명), pid(조사할 프로세스 ID) | 프로세스별 기록 목록. 각 항목에 event_id, ts(타임스탬프), host, pid, type(이벤트 종류), summary(원본 기록을 요약) | 최신 50건 | 활동 기록 없음: items=[], error=null. 입력 오류·검색 장애: items=[], error에 오류 코드와 설명 |
-출력값 예시:
+- get_process_activity
 {
   "items": [
     {
@@ -55,9 +58,7 @@
   ],
   "error": null
 }
-
-| `get_host_timeline(host, around_ts, minutes)` | 🔍 좌진우 | host(호스트명), around_ts(검색 구간 기준 시각), minutes(기준시각 앞뒤 시각 몇 분인지) | 해당 호스트의 이벤트 목록. 각 항목에 event_id, ts(타임스탬프), host, type(이벤트 종류), summary(원본 기록을 요약) | 시간순 100건 | 해당 시간대 기록 없음: items=[], error=null. 시간 형식·`minutes` 오류 또는 검색 장애: items=[], error에 오류 코드와 설명 |
-출력값 예시:
+- get_host_timeline
 {
   "items": [
     {
@@ -84,10 +85,7 @@
   ],
   "error": null
 }
-
-| `search_playbook(query, k)`                   | 📘 이동원 | `query`: 한국어 또는 영어 질문 문자열, `k`: 원하는 결과 개수(1~10) | `text`, `source`(PDF 파일명), `page`(1부터 시작), `score` | `k`건 | 관련 문서 없음: items=[], error=null. query·`k` 오류 또는 검색 장애: items=[], error에 오류 코드와 설명 |
-출력값 예시:
-출력값 예시:
+- search_playbook
 {
   "items": [
     {
