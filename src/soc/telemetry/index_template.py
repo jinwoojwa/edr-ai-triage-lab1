@@ -22,11 +22,43 @@ TEMPLATE_NAME = "edr-events"
 
 def build_template() -> dict:
     """edr-events-* 인덱스에 적용할 템플릿."""
-    # TODO[REC-1]: 매핑을 채웁니다. 검색·필터에 쓰는 칸(host, type, process.name 등)은 keyword,
-    # 시간은 date, pid·ppid·포트·바이트는 long, IP는 ip, 명령줄과 스크립트는 text와 keyword 둘 다(fields 사용).
-    # 왜 text와 keyword를 나누는지 DECISIONS.md에 한 줄로 적으세요. (03 문서 1장의 질문)
+    # REC-1: schema.py의 모든 칸을 적습니다. dynamic이 strict라서 여기 없는 칸이 오면 기록이 거절됩니다.
+    # - 정확히 일치로 찾는 칸(host, type, 이름 등)은 keyword
+    # - 명령줄·스크립트는 text(단어로 전문 검색)와 keyword(정확 일치, 집계)를 둘 다 둡니다 (fields).
+    #   keyword는 ignore_above보다 긴 값을 색인하지 않으므로(오류는 아님) 아주 긴 값에서 정확 일치는 빠집니다.
+    def text_and_keyword(ignore_above: int) -> dict:
+        return {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": ignore_above}}}
+
     properties: dict = {
-        # 예: "host": {"type": "keyword"},
+        "event_id": {"type": "keyword"},
+        "ts": {"type": "date"},
+        "host": {"type": "keyword"},
+        "type": {"type": "keyword"},
+        "process": {"properties": {
+            "pid": {"type": "long"},
+            "ppid": {"type": "long"},
+            "name": {"type": "keyword"},
+            "cmdline": text_and_keyword(4096),
+            "parent_name": {"type": "keyword"},
+            "signed": {"type": "boolean"},
+            "user": {"type": "keyword"},
+        }},
+        "network": {"properties": {
+            "dst_ip": {"type": "ip"},
+            "dst_port": {"type": "long"},
+            "proto": {"type": "keyword"},
+            "bytes_out": {"type": "long"},
+        }},
+        "file": {"properties": {
+            "path": {"type": "keyword"},
+            "action": {"type": "keyword"},
+            "new_path": {"type": "keyword"},
+        }},
+        "registry": {"properties": {
+            "key": {"type": "keyword"},
+            "value": {"type": "keyword", "ignore_above": 4096},
+        }},
+        "script_text": text_and_keyword(8191),
     }
     return {
         "index_patterns": [f"{settings.index_events}-*"],
