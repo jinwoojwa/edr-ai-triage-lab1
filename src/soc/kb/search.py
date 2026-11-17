@@ -39,9 +39,19 @@ def vector_search(query: str, k: int = 10) -> list[dict]:
 
 def rrf_fuse(result_lists: list[list[dict]], top_n: int) -> list[dict]:
     """여러 검색 결과를 순위로 합칩니다. 결과 하나하나에는 "id"가 있습니다."""
-    # TODO[DOC-5]: 결과 목록마다 순위(1부터)를 매겨 문서 id별로 1 / (RRF_K + 순위)를 더하고,
-    # 합계가 큰 순서로 top_n개를 돌려줍니다. 돌려줄 때 "score"를 RRF 점수로 바꿉니다.
-    raise NotImplementedError("TODO[DOC-5]")
+    scores: dict[str, float] = {}
+    first_hits: dict[str, dict] = {}
+    for results in result_lists:
+        seen: set[str] = set()
+        for rank, hit in enumerate(results, start=1):
+            doc_id = hit["id"]
+            if doc_id in seen:
+                continue
+            seen.add(doc_id)
+            first_hits.setdefault(doc_id, hit)
+            scores[doc_id] = scores.get(doc_id, 0.0) + 1 / (RRF_K + rank)
+    ranked = sorted(scores, key=lambda doc_id: (-scores[doc_id], doc_id))
+    return [first_hits[doc_id] | {"score": scores[doc_id]} for doc_id in ranked[:top_n]]
 
 
 def search(query: str, k: int = 3, mode: str = "hybrid") -> list[dict]:
@@ -63,6 +73,10 @@ def search_playbook(query: str, k: int = 3) -> list[dict]:
         query: 찾을 내용 (예: "LSASS 덤프 대응 승인권자")
         k: 돌려받을 조각 수 (기본 3)
     """
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query must be a non-empty string")
+    if isinstance(k, bool) or not isinstance(k, int) or not 1 <= k <= 10:
+        raise ValueError("k must be an integer between 1 and 10")
     return [{key: h[key] for key in ("source", "page", "category", "text", "score")} for h in search(query, k)]
 
 
