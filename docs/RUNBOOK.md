@@ -84,6 +84,41 @@ imageID ghcr.io/leedongwon9812/edr-ai-triage-lab1@sha256:edddea9121a59a39604e16c
 
 **남은 확인:** 공유 보안 그룹의 6443 제한은 적용하지 않는 것으로 결정했다. 필수 깨 보기 **1-1의 기술 재현·복구는 완료**, 🔍 기록 담당자와의 진단 후 나눔은 미완료다. 따라서 D2-10의 공동 완료 표시는 보류한다.
 
+## 서버 인프라 2단계: OpenSearch StatefulSet (2026-11-18)
+
+대상은 기존 `edr-team1`의 `soc` 네임스페이스다. 서버 운영체제·UFW·가비아 보안 그룹 설정은 변경하지 않았다. 배포 직전 서버 `free -h`는 전체 15Gi·`available` 14Gi·swap 0B, `df -h /`는 48G 중 44G 여유, `vm.max_map_count`는 262144였다. 자원 배분과 배포 후 사용량은 `docs/CAPACITY.md`에 기록했다. API는 `BACKEND=memory`를 유지했다.
+
+노트북의 저장소 밖 kubeconfig를 사용해 다음 명령을 실행했다.
+
+```powershell
+$k = 'C:\Users\Admin\.kube\edr-team.yaml'
+kubectl --kubeconfig $k apply --dry-run=server -f infra/k8s/20-opensearch.yaml
+kubectl --kubeconfig $k apply -f infra/k8s/20-opensearch.yaml
+kubectl --kubeconfig $k -n soc rollout status statefulset/opensearch --timeout=300s
+kubectl --kubeconfig $k -n soc get sts,pods,pvc,svc,endpointslices -o wide
+```
+
+서버 dry-run은 Service 2개와 StatefulSet 1개 모두 `created (server dry run)`이었다. 실제 적용 결과는 `service/opensearch created`, `service/opensearch-headless created`, `statefulset.apps/opensearch created`였고 rollout은 `partitioned roll out complete: 1 new pods have been updated...`를 반환했다. `opensearch-0`은 `1/1 Running`, StatefulSet은 `1/1`이었다. `data-opensearch-0` PVC는 `local-path`, 20Gi, `Bound`이며 PV 이름은 `pvc-a245c622-4bf4-4e82-a7a5-145659d6b83a`다. 일반 Service는 `10.43.162.96:9200`, headless Service는 `clusterIP: None`이고 두 EndpointSlice 모두 `opensearch-0:9200`을 가리켰다.
+
+**데이터 유지 검증:** `kubectl -n soc port-forward svc/opensearch 19200:9200` 뒤 `/_cluster/health`는 처음 `green`, 노드 1개, 미할당 샤드 0개였다. 테스트 인덱스 `stage2-persistence-20261118`을 샤드 1개·복제본 0개로 생성하고 고정 ID `probe-1`에 `{"stage":2,"marker":"persistent"}`를 저장했다. `_count`는 **1**이었다. 삭제 전 Pod UID는 `60767456-d621-4c0f-83d0-c182af011769`이었다.
+
+`kubectl --kubeconfig $k -n soc delete pod opensearch-0 --wait=false` 뒤 `rollout status`가 완료됐고, 새 Pod UID는 `340c7bb0-bec4-4a68-a202-2cb0864d516d`로 달라졌다. PVC 이름·PV 이름은 그대로였고 Pod는 다시 `1/1 Running`이었다. 포트 포워딩을 재연결한 후 `/_doc/probe-1`은 `found=true`, `marker=persistent`였으며 `_count`도 **1**이었다. 검증 후 테스트 인덱스만 삭제해 `acknowledged=true`를 확인했다. PVC는 삭제하지 않았다. 이 검증은 **같은 서버에서 Pod가 재생성될 때의 데이터 유지**를 보여 주며, 서버 디스크 손실에 대한 백업 검증은 아니다.
+
+**단일 노드 상태 확인:** 테스트 인덱스를 삭제한 뒤 클러스터가 한때 `yellow`, 미할당 샤드 1개였다. `_cat/indices`와 `_cat/shards`에서 `top_queries-2026.11.18-89289`의 기본 샤드는 `STARTED`, 복제본 1개는 `UNASSIGNED`임을 확인했다. 사용자 승인 후 **해당 인덱스에만** `PUT /top_queries-2026.11.18-89289/_settings`와 `{"index":{"number_of_replicas":0}}`을 적용했다. 응답은 `acknowledged=true`, 이후 `/_cluster/health`는 **`green`**, 노드 1개, 미할당 샤드 0개였다. 이 인덱스 설정 변경은 서버 OS 설정 변경이 아니다. 앞으로 만들어질 다른 `top_queries-*` 인덱스에 같은 복제본 설정이 적용되는지는 확인하지 않았다.
+
+**배포 후 사용량 (17:10 KST):** 서버 `free -h`는 사용 2.7Gi·`available` 12Gi, `df -h /`는 사용 6.1G·여유 42G였다. `kubectl top nodes`는 73m·2923Mi, `kubectl -n soc top pods`는 OpenSearch 25m·1427Mi, API 2m·97Mi였다. 시작·재시작 직후 OpenSearch CPU는 각각 1111m·1983m도 관측했다. 기존 API는 `1/1 Running`이며 포트 포워딩한 `/healthz` 응답은 `{"status":"ok","backend":"memory"}`였다.
+
+### [2-3] StorageClass 이름 오타 (기술 재현·복구 완료, 짝 진단 후 나눔 대기)
+
+- **증상:** 운영 StatefulSet과 별도로 `storageClassName: local-path-typo`인 임시 PVC `stage2-storageclass-check`와 이를 사용하는 임시 Pod를 생성하자 둘 다 `Pending`이 됐다.
+- **확인 명령과 출력:** `kubectl -n soc describe pvc stage2-storageclass-check`의 Events는 `ProvisioningFailed: storageclass.storage.k8s.io "local-path-typo" not found`였다. `kubectl -n soc describe pod stage2-storageclass-check`의 Events는 `FailedScheduling: pod has unbound immediate PersistentVolumeClaims`였다.
+- **원인:** 클러스터에 존재하지 않는 StorageClass 이름을 지정했다. 실제 StorageClass 이름은 `local-path`다.
+- **조치:** 임시 `pod/stage2-storageclass-check`와 `pvc/stage2-storageclass-check`만 삭제했다. 운영 `data-opensearch-0` PVC는 계속 `Bound`, OpenSearch StatefulSet은 `1/1`이었다. 운영 데이터나 PVC는 삭제하지 않았다.
+- **진단 후 나눔:** 🔍 기록 담당자가 부재 중이어서 공동 진단과 복구 시간 측정은 미완료다. 복귀 후 `describe pvc`를 첫 확인 명령으로 정할지 함께 검토한다.
+- **재발 방지:** 매니페스트 적용 전 `kubectl get storageclass`와 `storageClassName`을 대조한다.
+
+**2단계 결과:** OpenSearch 배포, PVC 바인딩, Pod 삭제 후 데이터 유지, 기존 API 확인은 완료했다. 2-3의 공동 진단 후 나눔은 남아 있다.
+
 ## 공통 1차 확인
 ```bash
 kubectl -n soc get pods,svc,ingress,pvc,jobs

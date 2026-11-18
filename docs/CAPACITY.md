@@ -30,20 +30,37 @@
 
 `sudo k3s kubectl describe node edr-team1`의 현재 전체 Pod 자원 예약은 **CPU requests 200m(5%), memory requests 140Mi, memory limits 170Mi**다. 이 예약은 kube-system의 coredns와 metrics-server에 해당한다. `sudo k3s kubectl -n soc describe deployment api`에서 API 1개가 `Available=True`이며, API에는 CPU·메모리 request/limit이 설정되지 않은 것을 확인했다. 따라서 API의 위 2m·97Mi는 **현재 사용량**이고, 향후 부하나 최대 사용량을 뜻하지 않는다.
 
-## 인프라 2단계 산정 대기
+## 인프라 2단계 자원 배분
 
-아래 워크로드는 아직 서버에서 실행하지 않았으므로 실측 사용량이나 적정 request/limit을 기입하지 않는다. 인프라 2단계 배포 전에 각 설정값을 정하고, 배포 후 `kubectl top` 및 디스크 사용량을 다시 측정한다.
+2026-11-18 배포 전 서버 재확인: `free -h` 전체 15Gi·`available` 14Gi·swap 0B, `df -h /` 전체 48G·여유 44G, `vm.max_map_count=262144`. 아래 OpenSearch 수치는 **설정값**이며, 다른 미배포 워크로드는 **후속 단계의 잠정 예산**이다. 실측 사용량과 혼동하지 않는다.
 
-| 워크로드 | 종류 | CPU req | Mem req / limit | 힙 | 현재 근거 |
+| 워크로드 | 종류 | CPU req | Mem req / limit | 힙 | 근거·상태 |
 |---|---|---|---|---|---|
-| OS + k3s + Traefik | 시스템 | 해당 없음 | 해당 없음 | - | 위 서버·노드 실측값 |
-| opensearch | StatefulSet 예정 | 미정 | 미정 | 미정 | 미배포 |
-| postgres | StatefulSet 예정 | 미정 | 미정 | - | 미배포 |
-| api | Deployment 1개 | 미설정 | 미설정 | - | 현재 사용량 2m / 97Mi |
-| worker | Deployment 예정 | 미정 | 미정 | - | 미배포 |
-| generator | Deployment 예정 | 미정 | 미정 | - | 미배포 |
-| kb-ingest (일시적) | Job 예정 | 미정 | 미정 | - | 미배포 |
-| **합계 / 여유** | | **현재 예약 200m / allocatable 4 CPU** | **현재 예약 140Mi / allocatable 16376036Ki** | - | 디스크 여유 44G; 추가 배포 전 재산정 필요 |
+| OS + k3s + Traefik | 시스템 | 500m 여유 확보 | 2Gi 여유 확보 | - | 노드 실측 53m / 1478Mi; 예약값 아님 |
+| opensearch | StatefulSet 1개 | 500m | 2Gi / 2Gi | 1Gi | 이번 단계 설정; 힙은 limit의 50% |
+| postgres | StatefulSet 예정 | 250m | 512Mi / 1Gi | - | 잠정 예산, 미배포 |
+| api | Deployment 1개 | 후속 단계 목표 100m | 후속 단계 목표 256Mi / 512Mi | - | 현재는 request/limit 미설정, 실측 2m / 97Mi |
+| worker | Deployment 예정 | 250m | 512Mi / 1Gi | - | 잠정 예산, 미배포 |
+| generator | Deployment 예정 | 100m | 256Mi / 512Mi | - | 잠정 예산, 미배포 |
+| kb-ingest (일시적) | Job 예정 | 250m | 512Mi / 1Gi | - | 잠정 예산, 미배포; 파싱 전략에 따라 재산정 |
+| **동시 실행 가정 합계** | | **약 1.95 CPU / 총 4 CPU** | **request·시스템 여유 약 6Gi / limit·시스템 여유 약 8Gi / 총 15Gi** | - | 미래 부하와 Job 동시 실행을 가정한 계획값 |
+
+OpenSearch PVC는 `local-path`·`ReadWriteOnce`·20Gi로 시작한다. 루트 디스크 여유 44G는 Postgres 데이터, 이미지, 로그와 나눠 써야 한다. `local-path`의 요청 용량 20Gi가 실제 파일 사용량에 대한 강제 상한인지는 별개이므로 `df -h /`와 OpenSearch 인덱스 크기를 관찰한다. 현재 StorageClass의 reclaim policy는 `Delete`, volume expansion은 `false`다. PVC 삭제는 영속성 시험에 포함하지 않는다.
+
+### 인프라 2단계 배포 후 실측
+
+**2026-11-18 17:10 KST**, OpenSearch Pod 재생성 뒤 측정했다.
+
+| 항목 | 명령 | 측정 결과 |
+|---|---|---|
+| 메모리 | 서버 `free -h` | 전체 15Gi, 사용 2.7Gi, `available` 12Gi, swap 0B |
+| 루트 디스크 | 서버 `df -h /` | 전체 48G, 사용 6.1G, 여유 42G, 사용률 13% |
+| 노드 사용량 | `kubectl top nodes` | CPU 73m(1%), 메모리 2923Mi(18%) |
+| OpenSearch Pod | `kubectl -n soc top pods` | CPU 25m, 메모리 1427Mi |
+| API Pod | `kubectl -n soc top pods` | CPU 2m, 메모리 97Mi |
+| 영속 볼륨 | `kubectl -n soc get pvc` | `data-opensearch-0` Bound, `local-path` 20Gi |
+
+OpenSearch 시작·재시작 직후에는 CPU 1111m 및 1983m도 관측했다. 위 25m는 한 시점의 안정화 후 사용량이며, 피크나 장기 평균이 아니다. 디스크 사용량은 배포 전 3.7G에서 6.1G로 증가했지만 이미지·로그·데이터 중 각 항목의 기여량은 분리 측정하지 않았다. Postgres 등 후속 워크로드를 배포하기 전에 이 실측값으로 예산을 다시 조정한다.
 
 재측정 명령:
 
