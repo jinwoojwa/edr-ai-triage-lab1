@@ -164,9 +164,12 @@ rundll32.exe (pid 51765) ← ppid 37467
 
 |           | API | 워커 |
 | --------- | --- | ---- |
-| liveness  |     |      |
-| readiness |     |      |
-| 종료 유예 |     |      |
+| startup | `/healthz` 5초 주기, 최대 150초. 기동 중 liveness/readiness를 보류 | `:9100/healthz` 10초 주기, 최대 300초. 인덱스·Postgres 체크포인터 준비 시간을 허용 |
+| liveness | `/healthz` 10초 주기·3회 실패. 프로세스 자체만 확인하고 DB 상태는 포함하지 않음 | `:9100/healthz` 30초 주기·3회 실패. 루프 하트비트가 180초 넘게 갱신되지 않으면 503 |
+| readiness | `/readyz` 10초 주기·3회 실패. OpenSearch·Postgres 연결이 모두 가능할 때만 트래픽 수신 | 없음. 워커는 Service 트래픽을 받지 않음 |
+| 종료 유예 | 기본값 | 240초. SIGTERM 뒤 현재 경보 처리를 마치고 종료할 시간 확보 |
+
+생성기는 HTTP 헬스 엔드포인트가 없어 이번 단계에 프로브를 넣지 않고 Pod 상태·로그·이벤트 증가량으로 확인한다. 워커 하트비트는 경보 처리 중 갱신되지 않으므로 기본 60초 대신 `HEARTBEAT_STALE_SEC=180`을 사용한다. 300초 lease와 처리 시간을 함께 관찰하고, 실제 LLM으로 전환하기 전 프로브·종료 유예를 재검토한다. API의 liveness가 DB까지 검사하면 DB 장애 때 API 재시작만 반복하므로 의존성 검사는 readiness에 둔다.
 
 ### 평가: 기준점(2일차)과 최종(3일차)
 

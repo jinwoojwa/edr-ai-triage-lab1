@@ -8,6 +8,6 @@ data:
   OPENSEARCH_URL: http://opensearch.soc.svc.cluster.local:9200
   CHECKPOINTER: postgres
   FAKE_LLM: "true"
-  TELEMETRY_TOOLS: mock
+  TELEMETRY_TOOLS: real
   KB_TOOLS: mock
   CHAT_MODEL: gpt-4o-mini

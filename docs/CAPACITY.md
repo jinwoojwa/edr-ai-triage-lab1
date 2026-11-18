@@ -79,6 +79,36 @@ OpenSearch 시작·재시작 직후에는 CPU 1111m 및 1983m도 관측했다. �
 
 Postgres의 38Mi는 시험 직후 한 시점의 사용량이다. 디스크는 2단계 측정 시점의 사용 6.1G·여유 42G에서 사용 6.6G·여유 41G로 바뀌었다. 이미지·DB 데이터·로그의 기여량은 분리 측정하지 않았다. 워커·생성기·KB 적재 Job의 위 표 예산은 아직 계획값이므로 다음 단계 전에 재측정한다.
 
+## 인프라 4단계 배포 전 자원 계획
+
+**2026-11-18 17:41 KST** 재측정: 서버 메모리 `available` 12Gi, 루트 디스크 여유 41G, 노드 사용량 81m·2978Mi. OpenSearch·Postgres PVC는 계속 `Bound`였다. 생성 속도를 낮춰 시작하고 아래 자원을 예약한다.
+
+| 신규 워크로드 | CPU request | 메모리 request / limit | 관찰 사항 |
+|---|---:|---:|---|
+| generator | 100m | 256Mi / 512Mi | `SIM_BENIGN_PER_TICK=1`, `SIM_TICK_SEC=10`, `SIM_ATTACK_EVERY_TICKS=6`으로 시작 |
+| worker | 250m | 512Mi / 1Gi | OpenSearch와 Postgres 연결, 승인 대기 시 체크포인트 사용 |
+
+기존 전체 Pod 예약은 CPU 1050m, 메모리 2956Mi였다. 신규 2개를 모두 배포하면 **계획상 CPU requests 1400m, memory requests 3724Mi**다. 이는 노드 allocatable CPU 4개·메모리 16376036Ki 이내다. 실제 사용량과 생성 데이터의 디스크 증가량은 배포 후 별도로 측정한다.
+
+### 인프라 4단계 배포 후 실측
+
+**2026-11-18 17:44 KST**, generator·worker가 각각 1개이고 경보 처리·4-3 복구가 끝난 뒤 측정했다.
+
+| 항목 | 명령 | 측정 결과 |
+|---|---|---|
+| 메모리 | 서버 `free -h` | 전체 15Gi, 사용 2.9Gi, `available` 12Gi, swap 0B |
+| 루트 디스크 | 서버 `df -h /` | 전체 48G, 사용 6.6G, 여유 41G, 사용률 14% |
+| 노드 사용량 | `kubectl top nodes` | CPU 132m(3%), 메모리 3124Mi(19%) |
+| API Pod | `kubectl -n soc top pods` | CPU 21m, 메모리 76Mi |
+| generator Pod | `kubectl -n soc top pods` | CPU 1m, 메모리 33Mi |
+| worker Pod | `kubectl -n soc top pods` | CPU 207m, 메모리 68Mi |
+| OpenSearch Pod | `kubectl -n soc top pods` | CPU 19m, 메모리 1460Mi |
+| Postgres Pod | `kubectl -n soc top pods` | CPU 10m, 메모리 40Mi |
+| 전체 Pod 예약 | `kubectl describe node edr-team1` | CPU requests 1400m(35%), memory requests 3724Mi(23%), memory limits 5290Mi(33%) |
+| 영속 볼륨 | `kubectl -n soc get pvc` | OpenSearch 20Gi와 Postgres 10Gi 모두 `Bound` |
+
+CPU 수치는 각 명령을 실행한 순간의 값이어서 Pod 행의 합과 노드 행이 같을 필요는 없다. 배포 전 디스크 여유 41G가 이 측정 시점에도 41G로 표시됐지만, 생성기는 계속 이벤트를 기록한다. `SIM_BENIGN_PER_TICK=1`, `SIM_TICK_SEC=10`, `SIM_ATTACK_EVERY_TICKS=6`의 낮은 속도로 유지하고 디스크 여유·인덱스 크기·승인 대기 경보 수를 지속 관찰한다. 사용량이 일정하다고 해석하지 않는다.
+
 재측정 명령:
 
 ```bash

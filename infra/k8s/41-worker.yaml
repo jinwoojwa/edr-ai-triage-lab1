@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: soc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      terminationGracePeriodSeconds: 240
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: worker
+          image: ghcr.io/leedongwon9812/edr-ai-triage-lab1:day2-stage1-8aab319
+          imagePullPolicy: Always
+          command:
+            - python
+            - -m
+            - soc.worker
+          ports:
+            - name: health
+              containerPort: 9100
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: soc-app-config
+            - secretRef:
+                name: soc-app-secrets
+          env:
+            - name: HEARTBEAT_STALE_SEC
+              value: "180"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3

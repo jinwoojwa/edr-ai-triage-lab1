@@ -157,6 +157,31 @@ API 매니페스트 적용 후 `deployment.apps/api 1/1`이었다. API는 기존
 
 **3단계 결과:** Postgres·Secret·ConfigMap 배포, API 실모드 전환, 체크포인트 테이블 생성, API Pod 재시작 후 승인·반려 HTTP 200 검증은 완료했다. Postgres Pod 자체의 재생성 후 데이터 유지는 이번에 시험하지 않았다. 3-3의 공동 진단 후 나눔은 남아 있다.
 
+## 서버 인프라 4단계: 생성기 + 워커 + 프로브 (2026-11-18)
+
+서버 운영체제·UFW·가비아 보안 그룹 설정은 변경하지 않았다. 배포 전 `free -h`는 전체 15Gi·`available` 12Gi, `df -h /`는 48G 중 41G 여유였고, 노드 사용량은 81m·2978Mi였다. 기존 OpenSearch·Postgres·API는 모두 `1/1`이고 API `/readyz`는 세 항목이 모두 `true`였다. 기존 GHCR 이미지 안에 `soc.worker`, `soc.simulator.run`, `soc.telemetry.tools`가 있는지 Python import로 확인했다. 이미지 기준 커밋 `8aab319` 이후 `src`, Dockerfile, requirements 변경이 없어 기존 태그를 재사용했다.
+
+`infra/k8s/31-config.yaml`의 `TELEMETRY_TOOLS`를 `real`로 변경하고 `11-api.yaml`에 startup(`/healthz`, 5초·30회), liveness(`/healthz`, 10초·3회), readiness(`/readyz`, 10초·3회)를 추가했다. 서버 dry-run은 ConfigMap·API를 `configured`, generator·worker를 `created (server dry run)`으로 검증했다. ConfigMap과 API를 적용한 뒤 `rollout status deployment/api`는 `successfully rolled out`이었다. 새 API Pod는 `1/1 Running`, 재시작 0회이며 `TELEMETRY_TOOLS=real`, `/healthz`는 `backend=real`, `/readyz`는 `{"ready":true,"opensearch":true,"postgres":true}`였다. `kubectl describe deployment api`에서 세 프로브가 각각 설정된 것도 확인했다. `KB_TOOLS=mock`, `FAKE_LLM=true`는 유지했다.
+
+생성기만 먼저 적용해 `rollout status deployment/generator`가 `successfully rolled out`, Pod가 `1/1 Running`·재시작 0회임을 확인했다. 설정은 `SIM_BENIGN_PER_TICK=1`, `SIM_TICK_SEC=10`, `SIM_ATTACK_EVERY_TICKS=6`이다. 워커가 아직 없을 때 생성기 로그는 10초 간격으로 `기록 2건, 새 알림 0건`을 출력했고, `edr-events-2026.11.18` 문서 수가 4건으로 늘었다. `python -m soc.simulator.run --inject credential_dump --host WS-007`을 생성기 Pod에서 실행한 결과는 **기록 3건, 새 알림 1건**이었다. 경보 `al-08a33a91890c`는 `status=new`, 근거 `event_id=evt-20ce37-00000002`였고 이 이벤트 문서가 실제 OpenSearch에 존재함을 확인했다. API `/stats`는 이때 `new=1`이었다.
+
+이어서 `41-worker.yaml`을 적용했다. 워커는 GHCR의 같은 이미지를 `python -m soc.worker`로 실행하고 9100번 `/healthz`·`/metrics`를 제공한다. startup은 10초·30회, liveness는 30초·3회, `HEARTBEAT_STALE_SEC=180`, 종료 유예는 240초다. rollout은 `successfully rolled out`, Pod는 `1/1 Running`·재시작 0회였다. `/healthz`는 `heartbeat 0s ago`, `/metrics`는 `soc_worker_pending_approval 3`, `soc_worker_failed 0`이었다. API `/stats`는 `new=0`, `pending_approval=3`, `failed=0`으로 바뀌었다.
+
+경보 `al-08a33a91890c`는 `pending_approval`, `attempts=1`, `worker=worker-866f9c8f5d-fp7lm`이 됐다. 리포트의 `approval_request`는 판정 `malicious`, 근거 `evt-20ce37-00000001`·`evt-20ce37-00000002`, 권고 `isolate_host`·`reset_password`·`collect_forensics`를 담았다. 두 근거 ID 모두 OpenSearch의 실제 이벤트 문서로 조회했다. Postgres `checkpoints`에서 이 경보의 `thread_id` 행 8개를 확인했다. **위험 조치가 실행된 것은 아니며 사람 승인을 기다리는 상태**다. 플레이북 source는 mock 검색의 응답이므로 실제 KB 적재·검색 품질을 증명하지 않는다.
+
+### [4-3] 워커 0개로 축소 (기술 재현·복구 완료, 짝 진단 후 나눔 대기)
+
+- **증상:** `kubectl -n soc scale deployment/worker --replicas=0` 후 Deployment는 `0/0`, 워커 Pod는 없었다. 생성기는 계속 동작했다.
+- **확인 명령과 출력:** 생성기 Pod에서 `credential_dump --host WS-008`을 주입하자 기록 3건·새 경보 1건이 만들어졌다. 경보 `al-f75e6b7d790d`는 `status=new`, API `/stats`는 `new=1`, `pending_approval=3`, `failed=0`이었다. Pod 자체의 오류는 없지만 처리 단계가 멈췄다.
+- **원인:** `status=new`를 가져갈 워커 복제본이 0개였다.
+- **조치:** `kubectl -n soc scale deployment/worker --replicas=1`로 복구했다. rollout은 `successfully rolled out`, 새 워커 Pod는 `1/1 Running`·재시작 0회였다. 위 경보는 `pending_approval`, `attempts=1`로 이동했고 `/stats`는 `new=0`, `pending_approval=6`, `failed=0`이었다. 새 워커 `/healthz`는 200, `/metrics`의 `soc_worker_pending_approval`은 3·`soc_worker_failed`는 0이었다.
+- **진단 후 나눔:** 🔍 기록 담당자가 부재 중이라 공동 진단·복구 시간 측정은 미완료다. 복귀 후 첫 확인 명령을 `kubectl -n soc get deploy worker`와 `/stats` 중 무엇으로 정할지 함께 검토한다.
+- **재발 방지:** Pod 상태만 보지 말고 Deployment 복제본과 `status=new` 경보 수를 함께 관찰한다. 스케일 0 실험 후 반드시 1로 복구한다.
+
+**측정 당시 (17:44 KST):** API·generator·worker·OpenSearch·Postgres Pod는 모두 `1/1 Running`, 재시작 0회였다. 두 PVC는 `Bound`, OpenSearch 클러스터는 `green`·미할당 샤드 0개였다. `edr-events-*`는 83건, `/stats`는 `new=0`, `pending_approval=6`, `completed=0`, `failed=0`이었다. 서버 `free -h` 사용 2.9Gi·`available` 12Gi, `df -h /` 사용 6.6G·여유 41G, 노드 사용량 132m·3124Mi였다. Pod별 사용량과 예약량은 `docs/CAPACITY.md`에 기록했다. 생성기는 낮춘 속도로 계속 실행 중이므로 이벤트와 승인 대기 경보 수는 이후 증가할 수 있다. 실제로 뒤이은 확인에서 `pending_approval=9`, `failed=0`이었다.
+
+**4단계 결과:** 실제 이벤트 기록 → 경보 생성 → 실제 텔레메트리 도구 조회 → 가짜 LLM 판정 → Postgres 체크포인트와 승인 대기까지 확인했다. 실제 LLM의 판정 품질과 실KB 검색, 사람의 최종 승인·조치 실행은 이번 검증 범위 밖이다. 4-3의 공동 진단 후 나눔은 남아 있다.
+
 ## 공통 1차 확인
 ```bash
 kubectl -n soc get pods,svc,ingress,pvc,jobs
