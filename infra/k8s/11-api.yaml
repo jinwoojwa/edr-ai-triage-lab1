@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: soc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: api
+          image: ghcr.io/leedongwon9812/edr-ai-triage-lab1:day2-stage1-8aab319
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: BACKEND
+              value: memory
+            - name: FAKE_LLM
+              value: "true"
+            - name: TELEMETRY_TOOLS
+              value: mock
+            - name: KB_TOOLS
+              value: mock
+            - name: CHECKPOINTER
+              value: memory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: soc
+spec:
+  type: ClusterIP
+  selector:
+    app: api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
