@@ -123,9 +123,30 @@ rundll32.exe (pid 51765) ← ppid 37467
 
 ## 👥 함께
 
+### D2-2 실제 도구 연결 검증 (2026-11-18)
+
+**방법:** `.env`의 `BACKEND=real`, `TELEMETRY_TOOLS=real`, `KB_TOOLS=real`, `FAKE_LLM=false`에서 `python scripts/verify_d2_2.py`를 실행했다. 실제 OpenSearch의 KB 인덱스(120건)를 사용하고, 시뮬레이터의 `credential_dump` 이벤트 3건만 고유한 테스트용 이벤트 인덱스에 적재했다. 에이전트를 실제 LLM으로 실행한 뒤 테스트 인덱스는 삭제했다. 조사 도구 계약 회귀 테스트(`tests/test_telemetry_tools_contract.py`, `tests/test_telemetry_tools.py`)는 44개 통과했다.
+
+| 확인 항목 | 결과 | 판정 근거 |
+| --- | --- | --- |
+| 실제 도구 선택·호출 | 통과 | 조사 도구 3개와 실제 `search_playbook` 선택 확인. 에이전트의 도구 응답 3건에 오류가 없었음. `agent_tool_calls=3`은 응답 개수이며 세 도구를 각각 호출했다는 뜻은 아님. |
+| 조회 기록과 판정 근거 | 통과 | 알림 `al-7d833405272f`에서 조회 ID와 리포트 인용 ID가 모두 `evt-00003005`, `evt-00003006`, `evt-00003007`. 세 ID는 적재한 원본 이벤트에 존재함. |
+| 플레이북 출처 | 통과 | 검색 결과 3건에 `source`·`page`가 있고, `02_playbook_credential_dump.pdf` 1쪽 등이 리포트 `sources`에 보존됨. |
+| 그래프 실행 | 통과 | `조사 → 도구 → 조사 → 판정 → 가드레일 → 권고 → 승인 → 리포트` 경로로 종료. 제공된 D2-2 출력의 판정은 `malicious`. |
+
+**발견된 문제와 범위:** 운영용 `edr-events-*`는 0건이어서 운영 인덱스 그대로는 실제 기록 조회를 확인할 수 없었다. 테스트 전용 인덱스로 검증했으며, 운영 알림 조사 전에는 이벤트 적재가 필요하다. 같은 알림의 별도 실제 LLM 실행에서는 `suspicious`도 나왔으므로 D2-2의 통과를 판정 정확도 보장으로 해석하지 않는다. `approval.decision=not_implemented`는 D2-4 승인 기능이 아직 구현되지 않았음을 나타낸다. **D2-2 실행 당시** G-1·G-2는 빈 검사였으므로 이 결과는 지어낸 근거 차단의 증거가 아니다. 차단 기능은 아래 D2-3 테스트로 별도 확인했다.
+
+**계약 대조:** 실제 조사 도구의 입력·출력 구조와 플레이북 검색의 `source`·`page`·`category`·`text`·`score`가 `docs/CONTRACT.md`와 일치했다. D2-2에서 확인된 계약 변경 사항은 없다.
+
 ### 가드레일 실패 처리 (2일차)
 
-<!-- 다시 조사 vs '의심'으로 낮추기. 무엇을 골랐고 왜 -->
+**구현한 검사:** G-1은 판정이 인용한 `event_id`가 조사 도구의 `seen_event_ids` 또는 알림의 `event_ids`에 없으면 `조회하지 않은 근거: <id>`를 반환한다. G-2는 `malicious` 판정에 서로 다른 근거 ID가 2개 미만이면 실패시킨다. 두 문제 목록은 `check()`가 합쳐 `ok`를 정한다.
+
+**현재 실패 처리 방식:** 설정 기본값 `GUARDRAIL_ON_FAIL=retry`, `MAX_GUARDRAIL_RETRIES=1`에 따라 첫 실패에는 문제를 알려 주고 한 번 재조사한다. 재실패하면 허용되지 않은 ID를 제거하고 `malicious`를 `suspicious`로 낮추며 `needs_review=true`를 남긴다. 한 번의 재조사 기회로 추가 근거를 찾을 수 있게 하되, 계속된 재시도와 확인되지 않은 악성 판정의 리포트 유출을 막기 위해 횟수를 제한했다. 이 흐름은 기존 `nodes.py` 구현을 유지했으며 G-1·G-2는 `guardrail.py`에서 완성했다.
+
+**검증 결과:** 구현 전 `tests/test_guardrail.py`는 4개 중 3개 실패했다. 구현 후 5개 모두 통과했고 `tests/test_graph_skeleton.py` 2개도 통과했다. 거짓말하는 `FakeLLM` 통합 테스트에서 `evt-fabricated-0001`이 최종 근거에서 제거됐고, 재조사 1회와 실패 로그 2건, 최종 `suspicious`·`needs_review=true`를 확인했다. `git diff --check`도 통과했다.
+
+**검사의 한계:** G-1은 알림의 ID를 허용하지만 그 ID의 OpenSearch 실재 여부를 다시 조회하지 않는다. G-2는 ID가 서로 다른지만 세며 이벤트 내용의 독립성은 확인하지 않는다. 실제 LLM·OpenSearch를 사용한 D2-2 통합 테스트는 G-1·G-2 구현 후 다시 실행하지 않았고, 실행 중인 Docker API 이미지도 아직 재빌드하지 않았다.
 
 ### 프로브 설계표 (2일차, 인프라 4단계)
 
