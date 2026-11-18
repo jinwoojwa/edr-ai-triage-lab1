@@ -1,10 +1,11 @@
-"""👥 사람 승인 테스트 (2일차 1-3, TODO[H-1]).
+"""👥 사람 승인 테스트 (2일차 1-3, H-1).
 
     pytest tests/test_approval.py -q
 """
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
+from soc.agent.nodes import approval
 from soc.agent.graph import build_graph, run_config
 
 ALERT = {"alert_id": "al-test-approval", "ts": "2026-11-16T09:12:02Z", "host": "WS-007", "rule_id": "R003",
@@ -19,10 +20,13 @@ def test_stops_for_isolation_then_resumes():
     st = g.get_state(cfg)
     assert st.next == ("approval",), "격리 권고인데 승인에서 멈추지 않았습니다"
     req = st.tasks[0].interrupts[0].value
-    assert req["host"] == "WS-007" and req["evidence_event_ids"]
+    assert req["alert_id"] == ALERT["alert_id"] and req["host"] == "WS-007"
+    assert req["verdict"] == "malicious" and req["confidence"] > 0
+    assert req["techniques"] == ["T1003.001"] and req["evidence_event_ids"]
     assert any(a["action"] == "isolate_host" for a in req["actions"])
     out = g.invoke(Command(resume={"approved": True, "approver": "김팀장"}), cfg)
     assert out["report"]["approval"]["approved"] is True
+    assert out["report"]["approval"]["decision"] == "approved"
     assert not g.get_state(cfg).next
 
 
@@ -32,7 +36,13 @@ def test_rejection_is_recorded():
     g.invoke({"alert": ALERT | {"alert_id": ALERT["alert_id"] + "-2"}}, cfg)
     out = g.invoke(Command(resume={"approved": False, "approver": "김팀장", "comment": "업무 중요 PC"}), cfg)
     assert out["report"]["approval"]["approved"] is False
+    assert out["report"]["approval"]["decision"] == "rejected"
     assert out["report"]["approval"]["comment"] == "업무 중요 PC"
+
+
+def test_safe_action_needs_no_approval():
+    state = {"recommendation": {"actions": [{"action": "monitor", "reason": "추가 관찰"}]}}
+    assert approval(state) == {"approval": {"required": False, "decision": "not_required"}, "trace": ["승인"]}
 
 
 def test_new_saver_has_no_memory():
