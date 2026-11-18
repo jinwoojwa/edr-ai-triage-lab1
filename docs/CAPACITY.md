@@ -62,6 +62,23 @@ OpenSearch PVC는 `local-path`·`ReadWriteOnce`·20Gi로 시작한다. 루트 �
 
 OpenSearch 시작·재시작 직후에는 CPU 1111m 및 1983m도 관측했다. 위 25m는 한 시점의 안정화 후 사용량이며, 피크나 장기 평균이 아니다. 디스크 사용량은 배포 전 3.7G에서 6.1G로 증가했지만 이미지·로그·데이터 중 각 항목의 기여량은 분리 측정하지 않았다. Postgres 등 후속 워크로드를 배포하기 전에 이 실측값으로 예산을 다시 조정한다.
 
+## 인프라 3단계 배포 후 실측
+
+**2026-11-18 17:27 KST**, Postgres와 실모드 API를 배포하고 승인 재개 시험을 마친 뒤 측정했다. Postgres는 CPU request 250m, 메모리 request 512Mi / limit 1Gi, PVC `local-path` 10Gi다. API는 CPU request 100m, 메모리 request 256Mi / limit 512Mi다. OpenSearch 설정은 그대로다.
+
+| 항목 | 명령 | 측정 결과 |
+|---|---|---|
+| 메모리 | 서버 `free -h` | 전체 15Gi, 사용 2.7Gi, `available` 12Gi, swap 0B |
+| 루트 디스크 | 서버 `df -h /` | 전체 48G, 사용 6.6G, 여유 41G, 사용률 14% |
+| 노드 사용량 | `kubectl top nodes` | CPU 68m(1%), 메모리 2991Mi(18%) |
+| OpenSearch Pod | `kubectl -n soc top pods` | CPU 19m, 메모리 1445Mi |
+| Postgres Pod | `kubectl -n soc top pods` | CPU 10m, 메모리 38Mi |
+| API Pod | `kubectl -n soc top pods` | CPU 2m, 메모리 77Mi |
+| 전체 Pod 예약 | `kubectl describe node edr-team1` | CPU requests 1050m(26%), memory requests 2956Mi(18%), memory limits 3754Mi(23%) |
+| 영속 볼륨 | `kubectl -n soc get pvc` | OpenSearch 20Gi와 Postgres 10Gi가 모두 `Bound` |
+
+Postgres의 38Mi는 시험 직후 한 시점의 사용량이다. 디스크는 2단계 측정 시점의 사용 6.1G·여유 42G에서 사용 6.6G·여유 41G로 바뀌었다. 이미지·DB 데이터·로그의 기여량은 분리 측정하지 않았다. 워커·생성기·KB 적재 Job의 위 표 예산은 아직 계획값이므로 다음 단계 전에 재측정한다.
+
 재측정 명령:
 
 ```bash

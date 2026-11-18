@@ -23,17 +23,17 @@ spec:
             - name: http
               containerPort: 8000
               protocol: TCP
-          env:
-            - name: BACKEND
-              value: memory
-            - name: FAKE_LLM
-              value: "true"
-            - name: TELEMETRY_TOOLS
-              value: mock
-            - name: KB_TOOLS
-              value: mock
-            - name: CHECKPOINTER
-              value: memory
+          envFrom:
+            - configMapRef:
+                name: soc-app-config
+            - secretRef:
+                name: soc-app-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
 ---
 apiVersion: v1
 kind: Service

@@ -119,6 +119,44 @@ kubectl --kubeconfig $k -n soc get sts,pods,pvc,svc,endpointslices -o wide
 
 **2단계 결과:** OpenSearch 배포, PVC 바인딩, Pod 삭제 후 데이터 유지, 기존 API 확인은 완료했다. 2-3의 공동 진단 후 나눔은 남아 있다.
 
+## 서버 인프라 3단계: Postgres + Secret + ConfigMap (2026-11-18)
+
+서버 운영체제·UFW·가비아 보안 그룹 설정은 변경하지 않았다. 배포 직전 서버는 `free -h` 전체 15Gi·`available` 12Gi, `df -h /` 전체 48G·여유 42G, swap 0B, `vm.max_map_count=262144`였다. OpenSearch는 `1/1`, API는 memory 모드 `1/1`이었다.
+
+`infra/scripts/secrets.sh`는 서버에서 임의의 48자리 비밀번호를 생성하고 동일한 값으로 `POSTGRES_PASSWORD`와 URL 인코딩된 `POSTGRES_DSN`을 `soc-app-secrets` Secret에 넣었다. 이번에는 `FAKE_LLM=true`라 `OPENAI_API_KEY`를 넣지 않았다. 비밀값은 터미널 출력·저장소 파일·런북에 남기지 않았다. `kubectl -n soc describe secret soc-app-secrets`에서 **키 이름과 길이만** 확인했다. 첫 PowerShell `Get-Content -Raw ... | ssh ... 'sudo bash -s'` 실행은 Secret 적용 뒤 PowerShell 파이프의 끝 CR 때문에 `bash: line 61: $'\r': command not found`로 종료했다. 입력 줄 끝의 CR을 제거하는 `sudo sed -e "s/\r$//" | sudo bash -s`로 다시 실행해 exit code 0을 확인했다. 두 번째 실행은 기존 Secret의 비밀번호를 재사용했고, 이후 Postgres·API가 같은 자격 증명으로 연결됐다. Secret에는 client-side apply의 평문 `last-applied-configuration` 어노테이션을 남기지 않았다.
+
+노트북의 저장소 밖 kubeconfig를 사용한 적용·확인 명령:
+
+```powershell
+$k = 'C:\Users\Admin\.kube\edr-team.yaml'
+kubectl --kubeconfig $k apply --dry-run=server -f infra/k8s/30-postgres.yaml -f infra/k8s/31-config.yaml -f infra/k8s/11-api.yaml
+kubectl --kubeconfig $k apply -f infra/k8s/31-config.yaml -f infra/k8s/30-postgres.yaml
+kubectl --kubeconfig $k -n soc rollout status statefulset/postgres --timeout=300s
+kubectl --kubeconfig $k -n soc exec postgres-0 -- pg_isready -U soc -d soc
+kubectl --kubeconfig $k -n soc exec postgres-0 -- psql -U soc -d soc -Atqc 'select 1'
+kubectl --kubeconfig $k apply -f infra/k8s/11-api.yaml
+kubectl --kubeconfig $k -n soc rollout status deployment/api --timeout=180s
+```
+
+서버 dry-run에서 Postgres Service 2개·StatefulSet·ConfigMap은 `created (server dry run)`, API Deployment는 `configured (server dry run)`이었다. 실제 적용 뒤 `statefulset.apps/postgres 1/1`, `pod/postgres-0 1/1 Running`, `data-postgres-0` PVC `Bound`·`local-path`·10Gi였다. PV 이름은 `pvc-4ae16ef5-ca30-4245-898b-92a2a28ab52e`다. `postgres` Service는 `10.43.165.50:5432`, headless Service는 `clusterIP: None`이고 EndpointSlice는 둘 다 `postgres-0:5432`를 가리켰다. `pg_isready`는 `accepting connections`, SQL `select 1`은 `1`이었다. OpenSearch는 계속 `green`이었다.
+
+API 매니페스트 적용 후 `deployment.apps/api 1/1`이었다. API는 기존 GHCR 이미지 `day2-stage1-8aab319`를 유지하고 ConfigMap·Secret을 `envFrom`으로 받는다. 포트 포워딩한 `/healthz`는 `{"status":"ok","backend":"real"}`, `/readyz`는 HTTP 200 및 `{"ready":true,"opensearch":true,"postgres":true}`였다. `kubectl -n soc logs deploy/api`에는 `Postgres 체크포인터 준비 완료`가 있었고, Postgres의 `pg_tables` 조회에서 `checkpoint_blobs`, `checkpoint_migrations`, `checkpoint_writes`, `checkpoints` 4개를 확인했다. 실제 환경은 `FAKE_LLM=true`, 도구는 `mock`이다.
+
+**API Pod 재시작 후 사람 승인 재개 검증:** 고유 ID `test-stage3-approve-mwluvynv`, `test-stage3-reject-mwluvynv`의 시험 경보 두 건을 `edr-alerts`에 넣었다. 각 `/alerts/{id}/triage`가 `pending_approval`을 반환했고, Postgres `checkpoints`에서 서로 다른 시험 thread 2개를 확인했다. API Pod UID는 재시작 전 `2f3e7047-da38-4387-ad7a-1a7defea1a5d`, `kubectl -n soc rollout restart deployment/api` 후 `343bd06c-1a68-40f2-b753-0a1970844dcc`였다. 새 Pod의 `/readyz`가 모두 `true`인 뒤 두 `/approvals/{id}` 호출은 각각 **HTTP 200**, 승인 `true`·반려 `false`, 경보 상태 `completed`였다. 같은 승인 재호출은 **HTTP 409**였다. 검증 후 두 시험 경보·리포트 문서와 해당 ID의 `checkpoint_writes`, `checkpoint_blobs`, `checkpoints` 행만 삭제했고, 시험 `checkpoints` 잔여 건수는 0이었다. 기존 운영 문서는 삭제하지 않았다.
+
+### [3-3] DSN 호스트를 localhost로 지정 (기술 재현·복구 완료, 짝 진단 후 나눔 대기)
+
+- **증상:** 운영 API 설정을 건드리지 않고 임시 Pod `stage3-dsn-check`에서 `pg_isready -h localhost -p 5432 -U soc -d soc`를 실행하자 `localhost:5432 - no response`, exit code 2였다.
+- **확인 명령과 출력:** 같은 Pod에서 `pg_isready -h postgres -p 5432 -U soc -d soc`는 `postgres:5432 - accepting connections`였다. 운영 Postgres Pod도 `1/1 Running`이었다.
+- **원인:** Pod 안의 `localhost`는 그 Pod 자신이며 Postgres Service 주소가 아니다.
+- **조치:** 임시 Pod를 삭제했다. 운영 API의 `POSTGRES_DSN`은 처음부터 Service 주소를 사용했으며 변경하지 않았다. API `/readyz`의 `postgres=true`를 재확인했다.
+- **진단 후 나눔:** 🔍 기록 담당자가 부재 중이어서 공동 진단과 복구 시간 측정은 미완료다. 복귀 후 처음 확인할 명령을 함께 정한다.
+- **재발 방지:** DSN 호스트를 `postgres.soc.svc.cluster.local`로 두고 Pod 내부 `pg_isready -h postgres`로 연결 경로를 확인한다.
+
+**배포 후 용량 (17:27 KST):** 서버 `free -h` 사용 2.7Gi·`available` 12Gi, `df -h /` 사용 6.6G·여유 41G였다. `kubectl top nodes`는 68m·2991Mi, Pod는 OpenSearch 19m·1445Mi, Postgres 10m·38Mi, API 2m·77Mi였다. `kubectl describe node`의 전체 Pod 요청은 CPU 1050m·메모리 2956Mi였다. 자세한 설정값과 실측값은 `docs/CAPACITY.md`에 기록했다.
+
+**3단계 결과:** Postgres·Secret·ConfigMap 배포, API 실모드 전환, 체크포인트 테이블 생성, API Pod 재시작 후 승인·반려 HTTP 200 검증은 완료했다. Postgres Pod 자체의 재생성 후 데이터 유지는 이번에 시험하지 않았다. 3-3의 공동 진단 후 나눔은 남아 있다.
+
 ## 공통 1차 확인
 ```bash
 kubectl -n soc get pods,svc,ingress,pvc,jobs
