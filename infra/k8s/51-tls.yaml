@@ -1,0 +1,45 @@
+# Requires cert-manager and the existing Traefik Middleware CRD.
+# Apply and verify Certificate Ready before publishing the HTTPS Ingress.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: letsencrypt-soc
+  namespace: soc
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    # ACME email is optional; no personal contact value is committed.
+    privateKeySecretRef:
+      name: soc-acme-account
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: traefik
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: soc-public
+  namespace: soc
+spec:
+  secretName: soc-public-tls
+  dnsNames: [soc.1.201.110.16.nip.io]
+  issuerRef:
+    name: letsencrypt-soc
+    kind: Issuer
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: public-https-redirect
+  namespace: soc
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true

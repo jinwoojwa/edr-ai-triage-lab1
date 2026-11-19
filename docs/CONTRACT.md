@@ -200,6 +200,24 @@
 - `api/dify.py`: 검색 예외를 HTTP 오류로 매핑하고 RRF 점수를 Dify용 0~1 범위로 별도 변환한다.
 - `tests/`: 출력 구조, 입력 오류, 빈 결과, 개수 제한, 호스트 혼합 방지, 실제 `event_id`와 `source` 보존을 확인한다.
 
+## 외부 API 공개와 유료 호출 인증 (2026-11-19)
+
+실습 합성 데이터는 공개한다는 사용자 결정에 따라 무료 API에는 인증을 요구하지 않는다. 외부 호스트는 `https://soc.1.201.110.16.nip.io`이며 실제 적용·검증 상태는 RUNBOOK을 따른다.
+
+| 경로 / 메서드 | 인증 | 동작·오류 계약 |
+| --- | --- | --- |
+| GET /docs, /openapi.json | 없음 | Swagger와 schema 공개, Dify operation은 schema에서 제외 |
+| GET /alerts, /alerts/{id}, /reports/{id}, /approvals, /stats | 없음 | 합성 경보·근거·리포트·승인 대기 조회; 없는 ID는 기존 404 |
+| POST /alerts/{id}/triage | Authorization: Bearer 전용 키 | TRIAGE_API_KEY와 상수 시간 비교. 누락/잘못된 키·scheme 401, WWW-Authenticate: Bearer. 서버 키 미설정은 503. 거절 시 조회·상태 변경·그래프/모델 실행 없음 |
+| POST /approvals/{id} | 없음 | pending_approval이며 checkpoint.next=(approval,)·interrupt 존재일 때만 재개. 다른 경보 상태·노드이면 409, 저장된 다음 단계 없음은 410. 정상 승인→report는 추가 chat/embedding 호출 없음 |
+| GET /healthz | 없음 | HTTP 기존 200 및 HTTPS 지원. CI 관측 경로 유지 |
+| /readyz | 내부 probe용 | 외부 Ingress에는 공개하지 않음 |
+| /dify/retrieval, 기타 경로 | 외부 공개 제외 | Dify 구현·연동은 이번 범위 아님 |
+
+TRIAGE_API_KEY는 OpenAI 제공자 키와 다른 전용 Secret이다. Swagger Authorize에 키 값만 입력하면 Bearer 헤더가 붙는다. 무료 operation에는 OpenAPI security를 설정하지 않는다. 키 값은 schema·응답·URL에 포함하지 않는다. 실제 유료 호출은 HTTPS로만 요청한다. HTTP의 docs·업무 경로는 HTTPS로 이동하며 HTTP에 키를 먼저 보내지 않는다.
+
+무인증 승인의 approver는 실습용 입력 이름이며 신원을 보증하지 않는다. 공유 키는 사용자별 권한·비용 상한·동시 재처리 방지를 제공하지 않는다. 향후 유료 임베딩 검색을 공개하면 그 route도 비용 기준으로 보호한다.
+
 ## 변경 이력
 
 | 변경 | 이유 | 합의 상태 |
@@ -210,4 +228,5 @@
 | 결과 없음은 빈 결과, 입력·검색 장애는 예외로 구분 | 공통 `error` 필드 제거에 따른 실패 의미를 명확히 하기 위해 | 상대 검토 필요 |
 | D2-7 `get_network_connections(host, minutes)` 추가: 외부 IP별 횟수·간격·실제 `event_id` 근거와 조회 제한을 명시 | 주기적인 외부 통신을 조사하는 도구를 문서 담당자가 기록 담당자 영역에 교차 구현 | 🔍 기록 담당자 리뷰 완료·승인 (개선 2건은 아래 행) |
 | `get_network_connections`에 `min_interval_seconds`, `max_interval_seconds`, `interval_stddev_seconds`와 선택 인자 `until_ts` 추가. mock에는 넣지 않음 | 평균 간격만으로는 비컨과 정상 통신을 구분할 수 없다(시뮬레이터 WS-010 10분 창에서 비컨 30.0초, 정상 SaaS 26.72초). 현재 시각 기준 조회는 오래된 알림에서 "통신 없음"과 구분되지 않는 빈 결과를 낸다 | 🔍 제안·반영 완료(코드·테스트·문서). **📘 이동원 확인 대기, 둘 다 동의한 것은 아님** |
+| 2026-11-19: 공개 API의 비용 기준 인증. triage만 Bearer 전용 키·401/503, 무료 조회·승인 무인증. 승인 체크포인트를 approval interrupt로 제한 | 외부 docs/API 이용과 유료 모델 호출 차단을 함께 제공. 무인증 승인으로 유료 단계를 재개하지 못하게 함 | 사용자 정책에 따라 구현, 담당자 교차 리뷰는 별도 |
 

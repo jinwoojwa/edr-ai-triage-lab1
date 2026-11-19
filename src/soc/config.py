@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from dotenv import load_dotenv
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -77,6 +78,7 @@ class Settings(BaseSettings):
     chunk_new_after_n_chars: int = 600
 
     # 연동 -------------------------------------------------------------------
+    triage_api_key: SecretStr = SecretStr("")  # 유료 트리아지 전용. 비어 있으면 해당 API만 차단
     dify_api_key: str = "change-me"
     prompt_version: str = "v1"
 

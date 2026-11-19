@@ -18,3 +18,75 @@ spec:
                 name: api
                 port:
                   number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-public-http
+  namespace: soc
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+    traefik.ingress.kubernetes.io/router.middlewares: soc-public-https-redirect@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: soc.1.201.110.16.nip.io
+      http:
+        paths:
+          - path: /docs
+            pathType: Exact
+            backend: { service: { name: api, port: { number: 80 } } }
+          - path: /openapi.json
+            pathType: Exact
+            backend: { service: { name: api, port: { number: 80 } } }
+          - path: /alerts
+            pathType: Prefix
+            backend: { service: { name: api, port: { number: 80 } } }
+          - path: /reports
+            pathType: Prefix
+            backend: { service: { name: api, port: { number: 80 } } }
+          - path: /approvals
+            pathType: Prefix
+            backend: { service: { name: api, port: { number: 80 } } }
+          - path: /stats
+            pathType: Exact
+            backend: { service: { name: api, port: { number: 80 } } }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-public-https
+  namespace: soc
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [soc.1.201.110.16.nip.io]
+      secretName: soc-public-tls
+  rules:
+    - host: soc.1.201.110.16.nip.io
+      http:
+        paths:
+          - path: /healthz
+            pathType: Exact
+            backend: { service: { name: api, port: { number: 80 } } }
+          - path: /docs
+            pathType: Exact
+            backend: { service: { name: api, port: { number: 80 } } }
+          - path: /openapi.json
+            pathType: Exact
+            backend: { service: { name: api, port: { number: 80 } } }
+          - path: /alerts
+            pathType: Prefix
+            backend: { service: { name: api, port: { number: 80 } } }
+          - path: /reports
+            pathType: Prefix
+            backend: { service: { name: api, port: { number: 80 } } }
+          - path: /approvals
+            pathType: Prefix
+            backend: { service: { name: api, port: { number: 80 } } }
+          - path: /stats
+            pathType: Exact
+            backend: { service: { name: api, port: { number: 80 } } }

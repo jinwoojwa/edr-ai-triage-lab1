@@ -95,7 +95,40 @@ curl.exe -fsS http://localhost:18002/readyz
 curl.exe -fsS http://soc.1.201.110.16.nip.io/healthz
 ```
 
-기대 응답은 `{"status":"ok","backend":"real"}`다. 외부 공개는 Exact `/healthz`만이며 `/docs`·업무 API는 별도 인증·TLS 작업 전까지 공개하지 않는다. Dify 연동은 사용자 결정으로 제외했다.
+기대 응답은 `{"status":"ok","backend":"real"}`다. 기존 HTTP Exact `/healthz`는 CI 검증을 위해 유지한다. HTTPS docs·업무 API 공개 설정은 아래와 같으며 실제 발급·적용 결과는 RUNBOOK의 ‘외부 docs/API 공개’를 확인한다.
+
+```powershell
+curl.exe -fsS https://soc.1.201.110.16.nip.io/healthz
+curl.exe -fsS https://soc.1.201.110.16.nip.io/openapi.json
+curl.exe -fsS https://soc.1.201.110.16.nip.io/alerts
+```
+
+브라우저에서 `https://soc.1.201.110.16.nip.io/docs`를 연다. 합성 데이터 조회·정상 승인/반려는 키 없이 이용한다. `POST /alerts/{id}/triage`만 Authorize에 전용 키를 입력해야 실행된다. 키 없이 요청하면 401이며 상태 변경·모델 호출은 없다. 서버 키 미설정은 이 route만 503이다. 승인 API는 approval interrupt만 재개하므로 조사·판정 단계 재실행은 409로 막는다. Dify·readyz·임의 경로는 외부에 공개하지 않는다.
+
+전용 키는 OpenAI 키와 다르며 클러스터 `soc-app-secrets`의 `TRIAGE_API_KEY`다. 허가된 관리자는 아래 명령으로 터미널에 값을 표시하지 않고 클립보드에 복사한 뒤 Swagger Authorize에 **키 값만** 붙여 넣는다. 공용 PC에서는 사용 후 클립보드와 브라우저 인증을 지운다. 이 명령의 결과나 키를 채팅·문서에 붙여 넣지 않는다.
+
+```powershell
+$keyEncoded = kubectl --kubeconfig $kc -n soc get secret soc-app-secrets -o jsonpath='{.data.TRIAGE_API_KEY}'
+[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($keyEncoded)) | Set-Clipboard
+Remove-Variable keyEncoded
+```
+
+키를 HTTP URL·query·문서·Git에 넣지 않는다. HTTP docs·업무 경로는 HTTPS로 이동하지만 처음부터 HTTPS를 사용한다. HTTP에 이미 보낸 헤더는 리다이렉트가 보호하지 못한다. 단순 유효 키 소지 여부만 검사하므로 사용자별 권한·월별 비용 제한 기능은 없다. 기존 worker의 자동 LLM 호출 비용도 별개로 지속된다.
+
+TLS 구성은 승인 후 cert-manager v1.21.3을 공식 manifest로 설치하고 `51-tls.yaml`의 Issuer·Certificate·Middleware를 적용한다. cert-manager 지원표는 Kubernetes 1.36까지로 현재 k3s 1.37은 공식 지원 범위 밖이며, 이 실습에서 실제 기동·발급을 검증하는 조건으로 승인받았다. 실습 성공을 공식 호환성 보증으로 해석하지 않는다. ACME 이메일은 선택 항목이므로 개인 주소를 임의 등록하지 않았다.
+
+```powershell
+kubectl --kubeconfig $kc -n cert-manager get deploy,pods
+kubectl --kubeconfig $kc apply -f infra/k8s/51-tls.yaml
+kubectl --kubeconfig $kc -n soc wait --for=condition=Ready certificate/soc-public --timeout=300s
+# 새 API가 무키 트리아지를 거절하는지 내부 검증한 후 공개
+kubectl --kubeconfig $kc apply -f infra/k8s/50-ingress.yaml
+kubectl --kubeconfig $kc -n soc get issuer,certificate,ingress
+```
+
+신규 Certificate Ready와 신뢰 검증 없이 인증서 경고를 우회하거나 curl -k로 공개 성공을 판정하지 않는다. `soc-public`은 renewBefore=360h·키 rotationPolicy=Always이며 notAfter/renewalTime을 주기적으로 확인한다. TLS 개인 키는 `soc-public-tls`, ACME 계정 키는 `soc-acme-account` Secret에만 저장한다. 사용자 키와도 별개다. 실제 만료·갱신 완료는 당일 기동 검사와 구분한다.
+
+기존 CI/CD는 API Deployment·Service만 적용한다. 50/51 YAML을 main에 push했다고 자동 반영되는 것이 아니므로 위 kubectl 적용과 결과 확인이 필요하다. 공개 전에 인증 이미지부터 배포하며, 문제 발생 시 먼저 `api-public-http`·`api-public-https`만 제거해 health 전용으로 축소한 뒤 이미지 복구를 검토한다. 인증 없는 이전 이미지를 업무 API가 열린 상태로 배포하지 않는다.
 
 ## 8. 배포와 롤백
 

@@ -135,6 +135,7 @@ def test_api_restart_resumes_approval_and_rejection(postgres_test_dsn):
         "POSTGRES_DSN": postgres_test_dsn, "FAKE_LLM": "true",
         "TELEMETRY_TOOLS": "mock", "KB_TOOLS": "mock",
         "INDEX_ALERTS": alerts_index, "INDEX_REPORTS": reports_index,
+        "TRIAGE_API_KEY": "test-only-h2-api-key",
     })
     url = f"http://127.0.0.1:{port}"
     proc = None
@@ -148,7 +149,8 @@ def test_api_restart_resumes_approval_and_rejection(postgres_test_dsn):
                 body=ALERT | {"alert_id": alert_id, "status": "new", "attempts": 0,
                               "created_at": now, "updated_at": now},
             )
-            response = httpx.post(url + f"/alerts/{alert_id}/triage", timeout=30)
+            response = httpx.post(url + f"/alerts/{alert_id}/triage", timeout=30,
+                                  headers={"Authorization": "Bearer test-only-h2-api-key"})
             response.raise_for_status()
             assert response.json()["status"] == "pending_approval"
         _stop_api(proc)

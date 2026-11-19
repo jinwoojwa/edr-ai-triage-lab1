@@ -225,6 +225,16 @@ Environment `soc`의 승인 후 기존 SSH 경로로 배포하며, known_hosts �
 
 최종 API는 `d202ee9@sha256:7a80be112acc36658e1a635f8f15b2177dce8bf0b75634203bd632e7a033fb83`, Ready 1/1·restart 0이며 real LLM/KB·Postgres 설정을 유지한다. KB 121개, PVC 2개, 기존 승인·반려 리포트 조회, 승인 대기 `al-f75e6b7d790d`의 실제 Postgres 체크포인트(다음 노드 approval·interrupt 1)를 확인했다. 인프라 7단계의 구현·게시·정상 배포·실패 감지·롤백 검증은 완료다. 최종 모델 품질 평가·교차 리뷰는 별도다.
 
+### 외부 docs/API 공개 — 비용 기준 인증 (2026-11-19)
+
+사용자는 합성 경보·조사 근거·리포트·승인 대기 공개를 허용했고 유료 호출에만 인증하도록 결정했다. 이에 docs/OpenAPI·조회·통계·승인/반려는 무인증, 트리아지 POST만 TRIAGE_API_KEY Bearer 인증으로 구현한다. 인증 실패는 조회·쓰기·모델 실행 전에 차단한다. 서버 키가 비어 있으면 해당 route만 503으로 닫힌다. 승인 API는 checkpoint.next=(approval,)·interrupt가 있어야 재개하므로 공개 승인이 유료 조사/판정을 다시 실행하는 통로가 되지 않는다.
+
+허용된 10개 파일에 더해 기존 Postgres API 재시작 테스트 1개 수정 승인을 받았다. 기존 무인증 트리아지 요청은 새 계약에서 503으로 실패했으며, 가짜 테스트 키와 Bearer 헤더만 추가했다. 이후 격리 OpenSearch 2.19.0·Postgres 16에서 Dify 제외 **90 passed, 0 skipped (12.35초)**였다. 신규 23개는 공개 route·인증 거절의 무부작용·승인/반려의 추가 모델/임베딩 호출 0을 검증했다. 실제 모델 품질 평가는 아니다.
+
+HTTPS는 Traefik·cert-manager로 제공하고 HTTP health는 기존 CI 때문에 200을 유지한다. docs·업무 HTTP만 HTTPS로 이동한다. Dify·readyz는 외부 경로에서 제외한다. 전역 / Prefix와 전역 로그인은 사용하지 않는다. cert-manager v1.21.3의 지원표는 1.36까지인데 현재 k3s는 1.37이므로 호환 확인 후 복구하는 조건의 설치 승인을 받았다. 실제 발급 결과·URL 확인은 RUNBOOK에 기록하며 공식 지원 여부와 구분한다.
+
+전용 Secret 추가·ACME/TLS Secret 생성은 승인받았다. OpenAI/DB Secret 값·OS·UFW·공유 보안 그룹은 유지한다. 키는 화면·Git에 출력하지 않는다. 공유 키에는 사용자별 신원·비용 상한·반복 호출 통제가 없고, 공개 승인자 이름도 신원 검증된 값이 아니다. 이 범위는 실습용 사용자 결정이며 별도 고도화와 구분한다. 실제 공개·유료 smoke 검증은 아직 진행 중이다.
+
 ### 평가: 기준점(2일차)과 최종(3일차)
 
 | 지표 | 기준점 (2일차, 2026-11-18) | 최종 | 바뀐 이유 |

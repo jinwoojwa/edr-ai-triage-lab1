@@ -425,6 +425,37 @@ API 교체로 종료된 port-forward를 숨김 프로세스로 다시 연결했�
 
 `11-api.yaml`의 소스 기본 이미지는 최초 CI 구성 시점의 유효한 수동 태그를 보존한다. CI가 이 파일을 읽고 테스트한 새 SHA tag@digest로 렌더링한 결과만 적용한다. CI 이후 이 소스 파일을 그대로 수동 apply하면 이전 이미지로 되돌아가므로 사용하지 않는다. 운영 배포는 workflow 또는 검증한 tag@digest를 렌더링하는 절차로 진행한다.
 
+## 외부 docs/API 공개 — 유료 호출만 인증 (2026-11-19)
+
+### 범위·승인·로컬 검증
+
+사용자 지정 10개 파일에 작업했고, 추가 승인으로 `tests/test_checkpoint_postgres.py`에 테스트 전용 TRIAGE_API_KEY와 트리아지 Bearer 헤더만 추가했다. 기존 테스트는 새 인증 정책 때문에 503으로 실패했으며 가짜 LLM 모드의 인증 우회로 해결하지 않았다. 새 API 테스트 23개와 기존 67개를 격리 로컬 OpenSearch 2.19.0(19270)·Postgres 16(15470)에서 실행해 **90 passed in 12.35s, skip 0**을 확인했다.
+
+```powershell
+# 운영과 분리된 일회성 테스트 서비스 사용
+$env:OPENSEARCH_URL='http://127.0.0.1:19270'
+$env:POSTGRES_DSN='postgresql://soc:ci-only-password@127.0.0.1:15470/soc'
+.\.venv\Scripts\python.exe -m pytest -q --ignore=tests/test_dify.py
+```
+
+새 테스트는 무키·틀린 키·잘못된 scheme이 401이며 graph/모델·경보 조회/변경을 하지 않는지, 서버 키 미설정 시 triage만 503인지, 공개 route의 무인증 200과 OpenAPI의 operation별 security를 확인했다. 실제 LangGraph 승인 interrupt를 만든 뒤 LLM·검색·query embedding 함수를 실패 stub으로 바꿔 승인/반려 모두 추가 호출 없이 완료됨을 검증했다. 승인 외 다음 단계는 409, 상태 없음은 410으로 거절한다.
+
+### Secret·인증서 준비
+
+사용자가 전용 키 Secret 등록과 cert-manager v1.21.3 설치·ACME/TLS Secret 생성을 승인했다. 공식 지원표의 상한 1.36보다 높은 k3s 1.37에서 실습 검증하는 조건이며 호환 실패 시 이번 설치를 복구하기로 했다. 기존 Secret은 값 대신 키 이름/해시로 보존 상태를 비교한다.
+
+TRIAGE_API_KEY는 무작위 전용 키를 메모리에서 생성하고 SSH stdin → 서버 kubectl merge patch로 기존 soc-app-secrets의 해당 항목만 추가했다. 값은 로그·명령 인자·파일에 남기지 않았다. 최초 로컬 `--patch-file -`는 파일 읽기 오류로 반영되지 않았으며 `/dev/stdin`으로 재시도해 등록했다. API는 새 이미지 배포에서 환경변수를 읽고 worker는 재시작하지 않는다.
+
+공식 release manifest v1.21.3의 SHA-256 `c04a51295adda2b1a775146751f973e787190778c7f35180861d9678876e5c74`를 GitHub asset digest와 대조해 설치했다. controller·cainjector·webhook Pod 기동과 webhook rollout을 확인했다. 51-tls.yaml은 server dry-run을 통과한 뒤 Issuer letsencrypt-soc·Certificate soc-public·Middleware public-https-redirect를 생성했다. ACME 이메일은 선택 항목이며 미지정이다. 신뢰된 인증서가 준비되기 전 업무 경로는 열지 않는다.
+
+### 배포·검증 진행 상태
+
+현재는 인증 API·테스트·Ingress/TLS 매니페스트 구현 및 로컬 테스트가 통과했고 Secret/인증서 준비를 진행 중이다. 새 API의 Actions SHA·digest·인증서 발급·외부 HTTP/HTTPS·Swagger·유료 smoke 결과는 실제 실행 후 아래에 기록한다. 완료를 미리 선언하지 않는다. 기존 HTTP health는 유지하며 OS·방화벽·공유 보안 그룹은 변경하지 않았다.
+
+### 복구
+
+공개 후 실패하면 먼저 api-public-http·api-public-https Ingress를 삭제해 기존 health 전용으로 축소한다. 그다음 이전 정상 API revision을 복구한다. Secret·인증서는 image undo 대상이 아니다. 기존 OpenAI/DB 값은 보존하고 전용 키 회수·인증서 도구 정리는 영향 확인과 승인 범위에 따라 수행한다. cert-manager 삭제는 다른 인증서 사용 여부를 먼저 확인한다.
+
 ## 공통 1차 확인
 ```bash
 kubectl -n soc get pods,svc,ingress,pvc,jobs
