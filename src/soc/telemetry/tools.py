@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from ipaddress import ip_address, ip_network
+from statistics import fmean, pstdev
 
 from langchain_core.tools import tool
 
@@ -84,16 +85,16 @@ def _check_minutes(minutes) -> int:
     return minutes
 
 
-def _check_around_ts(around_ts) -> datetime:
+def _check_around_ts(around_ts, name: str = "around_ts") -> datetime:
     """시간대가 있는 ISO 8601 문자열만 받아 UTC로 바꿉니다. 시간대가 없으면 기준 시각이 모호해서 거절합니다."""
     if not isinstance(around_ts, str):
-        raise ValueError("around_ts는 ISO 8601 문자열이어야 합니다 (예: 2026-11-16T09:12:02Z)")
+        raise ValueError(f"{name}는 ISO 8601 문자열이어야 합니다 (예: 2026-11-16T09:12:02Z)")
     try:
         t = _parse_ts(around_ts)
     except ValueError:
-        raise ValueError(f"around_ts를 시각으로 읽을 수 없습니다: {around_ts!r} (예: 2026-11-16T09:12:02Z)") from None
+        raise ValueError(f"{name}를 시각으로 읽을 수 없습니다: {around_ts!r} (예: 2026-11-16T09:12:02Z)") from None
     if t.tzinfo is None:
-        raise ValueError("around_ts에 시간대가 없습니다. Z 또는 +09:00 같은 시간대를 붙이세요")
+        raise ValueError(f"{name}에 시간대가 없습니다. Z 또는 +09:00 같은 시간대를 붙이세요")
     return t.astimezone(timezone.utc)
 
 
@@ -201,19 +202,26 @@ def _external_ip(value: str) -> bool:
                 or address.is_unspecified or any(address in net for net in INTERNAL_NETWORKS))
 
 
-def get_network_connections(host: str, minutes: int) -> dict:
-    """호스트의 최근 외부 IP 통신을 횟수와 평균 간격으로 요약합니다.
+def get_network_connections(host: str, minutes: int, until_ts: str | None = None) -> dict:
+    """호스트의 외부 IP 통신을 목적지별 횟수와 접속 간격 통계로 요약합니다.
 
-    주기적인 외부 통신이나 비컨이 의심될 때 이 도구를 선택하세요. 현재 UTC 시각부터
-    직전 minutes분의 network 기록을 조사하며, 실제 event_id가 든 최근 기록도 돌려줍니다.
-    내부망 통신이나 특정 프로세스의 상세 활동은 다른 조사 도구로 확인하세요.
+    주기적인 외부 통신이나 비컨이 의심될 때 이 도구를 선택하세요. 목적지(dst_ip)마다 횟수,
+    평균·최소·최대 접속 간격(초), 간격의 표준편차를 돌려줍니다. 간격이 일정해서 표준편차가
+    작고 최소·최대가 평균에 가까우면 규칙적인(비컨 의심) 통신이고, 표준편차가 평균만큼 크면
+    불규칙한 일반 통신입니다. 실제 event_id가 든 최근 기록도 돌려줍니다.
+
+    기본은 현재 UTC 시각부터 직전 minutes분을 봅니다. 오래된 알림이면 until_ts에 알림 시각
+    (또는 그보다 조금 뒤)을 넘겨 그 시각까지의 minutes분을 조사하세요. 빈 결과는 '통신 없음'이
+    아니라 조회 구간에 기록이 없다는 뜻일 수 있으니, 돌려준 from/to가 알림 시각을 포함하는지
+    확인하세요. 내부망 통신이나 특정 프로세스의 상세 활동은 다른 조사 도구로 확인하세요.
 
     Args:
         host: 조사할 PC 이름 (예: WS-007)
-        minutes: 현재 시각부터 거슬러 볼 분 수 (0보다 큰 정수)
+        minutes: until_ts(생략하면 현재 시각)부터 거슬러 볼 분 수 (0보다 큰 정수)
+        until_ts: 조회 구간의 끝 시각 (시간대가 있는 ISO 형식, 예: 2026-11-16T09:12:02Z). 생략하면 현재 시각
     """
     host, minutes = _check_host(host), _check_minutes(minutes)
-    end = datetime.now(timezone.utc)
+    end = datetime.now(timezone.utc) if until_ts is None else _check_around_ts(until_ts, "until_ts")
     try:
         start = end - timedelta(minutes=minutes)
     except OverflowError:
@@ -237,12 +245,17 @@ def get_network_connections(host: str, minutes: int) -> dict:
     for ip, events in groups.items():
         events.sort(key=lambda e: (_parse_ts(e["ts"]), e["event_id"]))
         times = [_parse_ts(e["ts"]) for e in events]
-        interval = ((times[-1] - times[0]).total_seconds() / (len(times) - 1)
-                    if len(times) > 1 else None)
+        gaps = [(b - a).total_seconds() for a, b in zip(times, times[1:])]     # 연속 연결 사이의 간격(초)
+        # 한 건뿐이면 간격이 없으므로 통계는 모두 None. 평균만으로는 규칙적인 비컨과 불규칙한 정상 통신을
+        # 구분할 수 없어서, 간격의 최소·최대·표준편차를 함께 돌려준다 (CONTRACT.md).
+        stats = ({"avg_interval_seconds": round(fmean(gaps), 2), "min_interval_seconds": round(min(gaps), 2),
+                  "max_interval_seconds": round(max(gaps), 2), "interval_stddev_seconds": round(pstdev(gaps), 2)}
+                 if gaps else dict.fromkeys(("avg_interval_seconds", "min_interval_seconds",
+                                             "max_interval_seconds", "interval_stddev_seconds")))
         connections.append({
             "dst_ip": ip, "count": len(events),
             "first_ts": events[0]["ts"], "last_ts": events[-1]["ts"],
-            "avg_interval_seconds": round(interval, 2) if interval is not None else None,
+            **stats,
             "events": [summarize(e) for e in events[-NETWORK_EVIDENCE:]],
             "events_truncated": len(events) > NETWORK_EVIDENCE,
         })

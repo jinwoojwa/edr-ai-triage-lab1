@@ -3,7 +3,7 @@
 기준 코드: `src/soc/mocks.py`, `src/soc/telemetry/tools.py`, `src/soc/kb/search.py`.
 이 문서는 기존 협의서를 현재 코드 골격의 반환 구조에 맞춰 다시 쓴 구현 목표다. 실제 조사 도구와 RRF 결합에는 아직 TODO가 있으므로, 아래 내용이 모두 구현됐다는 뜻은 아니다.
 
-- 🔍 기록 담당: 좌진우 — 기존 조사 도구 3개. D2-7의 네 번째 조사 도구는 📘 문서 담당자가 교차 구현하고 🔍 기록 담당자 리뷰를 기다린다.
+- 🔍 기록 담당: 좌진우 — 기존 조사 도구 3개. D2-7의 네 번째 조사 도구는 📘 문서 담당자가 교차 구현하고 🔍 기록 담당자가 리뷰해 승인했다. 리뷰에서 낸 개선 2건(간격 통계, `until_ts`)은 🔍가 반영했고 📘 확인을 기다린다.
 - 📘 문서 담당: 이동원 — 플레이북 검색 도구 1개
 - 계약을 바꿀 때는 두 사람이 합의하고 가짜 도구, 실제 도구, 호출부, 테스트를 함께 갱신한다.
 
@@ -23,10 +23,12 @@
 | `get_process_tree(host, pid)` | 비어 있지 않은 `host` 문자열, 0 이상의 정수 `pid` | `{host, pid, process, ancestors, children, note?}`. `process`는 요약 기록 또는 `null`. `ancestors`는 가까운 부모부터, `children`은 자식 요약 목록. 배열 위치가 관계를 나타내므로 별도 `relationship` 필드는 두지 않는다. | `process: null`, `ancestors: []`, `children: []` | 부모 최대 5단계, 자식 최대 20건. 자식은 `ts` 오름차순 후 `event_id`로 순서를 고정한다. |
 | `get_process_activity(host, pid)` | 위와 같은 `host`, `pid` | `{host, pid, events}`. `events`는 해당 프로세스의 `network`, `file`, `registry`, `script` 기록 요약. | `events: []` | 가장 최근 기록 최대 50건을 고른 뒤 `ts` 오름차순으로 반환한다. `process` 생성 기록은 이 목록에 포함하지 않는다. |
 | `get_host_timeline(host, around_ts, minutes=10)` | 비어 있지 않은 `host`, 시간대가 있는 ISO 8601 문자열 `around_ts`, 0보다 큰 정수 `minutes` | `{host, from, to, events, truncated}`. `from`과 `to`는 조회 범위의 ISO 8601 시각. `events`는 해당 PC의 모든 이벤트 종류의 요약. | `events: []`, `truncated: false` | 기준 시각 앞뒤 `minutes`분, 양 끝 포함. `ts` 오름차순, 최대 100건. 잘렸으면 `truncated: true`. |
-| `get_network_connections(host, minutes)` | 비어 있지 않은 `host`, 0보다 큰 정수 `minutes` | `{host, from, to, connections, truncated}`. `connections`의 항목은 `{dst_ip, count, first_ts, last_ts, avg_interval_seconds, events, events_truncated}`. `events`는 실제 `event_id`를 가진 네트워크 기록 요약. | `connections: []`, `truncated: false` | 호출 시 UTC 현재 시각부터 직전 `minutes`분(양 끝 포함). 최근 네트워크 기록 최대 1,000건을 IP별로 집계하고 `count` 내림차순·IP 오름차순으로 최대 20개 IP를 반환. IP별 근거는 최근 5건을 시간순으로 반환. |
+| `get_network_connections(host, minutes, until_ts=None)` | 비어 있지 않은 `host`, 0보다 큰 정수 `minutes`, 선택 `until_ts`(시간대가 있는 ISO 8601 문자열, 생략하면 현재 시각) | `{host, from, to, connections, truncated}`. `connections`의 항목은 `{dst_ip, count, first_ts, last_ts, avg_interval_seconds, min_interval_seconds, max_interval_seconds, interval_stddev_seconds, events, events_truncated}`. `events`는 실제 `event_id`를 가진 네트워크 기록 요약. | `connections: []`, `truncated: false` | `until_ts`(없으면 호출 시 UTC 현재 시각)부터 직전 `minutes`분(양 끝 포함). 최근 네트워크 기록 최대 1,000건을 IP별로 집계하고 `count` 내림차순·IP 오름차순으로 최대 20개 IP를 반환. IP별 근거는 최근 5건을 시간순으로 반환. |
 | `search_playbook(query, k=3)` | 공백만으로 이루어지지 않은 한국어·영어 질문 문자열 `query`, 1~10의 정수 `k` | **목록** `[{source, page, category, text, score}, ...]`. `category`는 파서의 요소 종류이며 없으면 `null`. | `[]` | 관련도 높은 순서로 최대 `k`건. |
 
-`get_network_connections`는 IPv4 사설망(`10/8`, `172.16/12`, `192.168/16`)과 IPv6 고유 로컬(`fc00::/7`), 루프백·링크 로컬·멀티캐스트·미지정 주소를 제외한다. 실습용 문서 IP `198.51.100.0/24`, `203.0.113.0/24`는 외부 목적지로 취급한다. 같은 IP의 연속 연결 간격을 시간순으로 구해 평균 초를 소수 둘째 자리까지 반환하며, 한 건뿐이면 `avg_interval_seconds: null`이다. `events_truncated`는 해당 IP의 근거가 5건을 초과할 때 참이다. `truncated`는 전체 조회가 1,000건 또는 IP 20개 제한에 걸렸다는 뜻이며, 이때 `count`와 간격은 조회된 범위에 한정된다. 현재 시각 기준 조회이므로 오래된 시뮬레이터 기록은 빈 결과가 될 수 있다.
+`get_network_connections`는 IPv4 사설망(`10/8`, `172.16/12`, `192.168/16`)과 IPv6 고유 로컬(`fc00::/7`), 루프백·링크 로컬·멀티캐스트·미지정 주소를 제외한다. 실습용 문서 IP `198.51.100.0/24`, `203.0.113.0/24`는 외부 목적지로 취급한다. 같은 IP의 연속 연결 간격을 시간순으로 구해 평균·최소·최대와 표준편차(모집단)를 초 단위로 소수 둘째 자리까지 반환하며, 한 건뿐이어서 간격이 없으면 네 값이 모두 `null`이다(두 건이면 간격이 하나라 표준편차는 `0.0`). **평균만으로는 규칙적인 비컨과 불규칙한 정상 통신을 구분할 수 없으므로** 규칙성은 표준편차와 최소·최대로 판단한다. 표준편차가 작고 최소·최대가 평균에 가까우면 규칙적이고, 표준편차가 평균만큼 크면 불규칙하다. `events_truncated`는 해당 IP의 근거가 5건을 초과할 때 참이다. `truncated`는 전체 조회가 1,000건 또는 IP 20개 제한에 걸렸다는 뜻이며, 이때 `count`와 간격은 조회된 범위에 한정된다.
+
+`until_ts`를 생략하면 현재 시각 기준이라 오래된 알림이나 고정 시각의 시뮬레이터 기록은 빈 결과가 나온다. 이 빈 결과는 "통신 없음"이 아니라 조회 구간에 기록이 없다는 뜻일 수 있으므로, 오래된 알림은 `until_ts`에 알림 시각(또는 그보다 조금 뒤)을 넘겨 조사하고 응답의 `from`·`to`가 알림 시각을 포함하는지 확인한다. 조회 구간은 `[until_ts - minutes, until_ts]`로 한쪽만 거슬러 올라가며, 앞뒤를 모두 보는 `get_host_timeline`과 다르다. `until_ts`는 UTC로 바꿔 `from`·`to`에 반영한다.
 
 ### 검색 점수의 의미
 
@@ -143,6 +145,9 @@
     "first_ts": "2026-11-16T09:02:00Z",
     "last_ts": "2026-11-16T09:02:30Z",
     "avg_interval_seconds": 30.0,
+    "min_interval_seconds": 30.0,
+    "max_interval_seconds": 30.0,
+    "interval_stddev_seconds": 0.0,
     "events": [
       {"event_id": "evt-00000025", "ts": "2026-11-16T09:02:00Z", "type": "network", "pid": 40702, "ppid": 19329, "name": "powershell.exe", "cmdline": "powershell.exe ...", "user": "kim", "signed": true, "detail": "198.51.100.23:443 (300 bytes)"},
       {"event_id": "evt-00000026", "ts": "2026-11-16T09:02:30Z", "type": "network", "pid": 40702, "ppid": 19329, "name": "powershell.exe", "cmdline": "powershell.exe ...", "user": "kim", "signed": true, "detail": "198.51.100.23:443 (300 bytes)"}
@@ -183,13 +188,13 @@
 - 타임라인에 기록이 없으면 `{ "host": "WS-007", "from": "2026-11-16T09:00:00Z", "to": "2026-11-16T09:02:00Z", "events": [], "truncated": false }`.
 - 조회 구간에 외부 네트워크 기록이 없으면 `{ "host": "WS-007", "from": "...", "to": "...", "connections": [], "truncated": false }`.
 - 플레이북에 관련 문서가 없으면 `[]`.
-- 예: `k=0`, 빈 `query`, 잘못된 `around_ts`, 네트워크 도구의 빈 `host`·0 이하 또는 정수가 아닌 `minutes`에는 `ValueError`. OpenSearch·임베딩 장애에는 예외를 전달한다. 오류를 빈 결과로 가장하지 않는다.
+- 예: `k=0`, 빈 `query`, 잘못된 `around_ts`, 네트워크 도구의 빈 `host`·0 이하 또는 정수가 아닌 `minutes`·시간대 없는 `until_ts`에는 `ValueError`. OpenSearch·임베딩 장애에는 예외를 전달한다. 오류를 빈 결과로 가장하지 않는다.
 
 ## 호출부와 테스트 반영 항목
 
-- `mocks.py`: 기존 네 도구의 반환 구조를 유지하고 입력 검증과 개수 제한을 맞춘다. mock 점수는 가짜 값임을 표시한다. D2-7 네트워크 도구는 현재 실제 도구 목록에만 등록돼 있으며, mock 목록 반영 여부는 🔍 기록 담당자 리뷰 대기다.
+- `mocks.py`: 기존 네 도구의 반환 구조를 유지하고 입력 검증과 개수 제한을 맞춘다. mock 점수는 가짜 값임을 표시한다. D2-7 네트워크 도구는 실제 도구 목록에만 등록하고 mock에는 넣지 않는 것이 🔍 기록 담당자의 리뷰 의견이다(가짜 LLM이 처음 두 도구만 쓰고 기존 세 도구가 견본으로 충분하다). 📘 확인 대기.
 - `telemetry/tools.py`: TODO[REC-2~4]를 구현하며 `summarize()`의 실제 `event_id`를 유지한다. `host`+`pid` 필터, 부모 5단계·자식 20건·활동 50건·타임라인 100건을 확인한다.
-- `telemetry/tools.py`: D2-7 네트워크 도구는 `host`·시간 구간 필터, 외부 IP 분류, 횟수·간격 집계 및 실제 `event_id` 보존을 확인한다. 실제 도구 목록 등록 후 에이전트의 도구 선택·근거 ID 수집 경로도 확인한다.
+- `telemetry/tools.py`: D2-7 네트워크 도구는 `host`·시간 구간 필터, 외부 IP 분류, 횟수·간격 집계(평균·최소·최대·표준편차), `until_ts` 구간 이동과 시간대 변환, 실제 `event_id` 보존을 확인한다. 실제 도구 목록 등록 후 에이전트의 도구 선택·근거 ID 수집 경로도 확인한다.
 - `kb/search.py`: 내부 평가용 `search()`는 목록을 유지한다. 외부 도구 `search_playbook()`도 목록을 반환하며 `query`와 `k`를 검증한다.
 - `agent/nodes.py`: 조사 도구의 예외를 도구 메시지로 전달한다. `playbook`은 목록으로 보관해 출처를 수집한다.
 - `api/dify.py`: 검색 예외를 HTTP 오류로 매핑하고 RRF 점수를 Dify용 0~1 범위로 별도 변환한다.
@@ -203,5 +208,6 @@
 | `relationship`, `summary` 대신 배열 위치와 `summarize()` 필드를 사용 | 현재 조사 도구의 데이터 모양과 일치시키기 위해 | 상대 검토 필요 |
 | `search_playbook`을 목록 반환으로 명시하고 점수를 RRF 원점수로 설명 | 현재 검색·Dify 호출 방식과 점수 계산에 맞추기 위해 | 상대 검토 필요 |
 | 결과 없음은 빈 결과, 입력·검색 장애는 예외로 구분 | 공통 `error` 필드 제거에 따른 실패 의미를 명확히 하기 위해 | 상대 검토 필요 |
-| D2-7 `get_network_connections(host, minutes)` 추가: 외부 IP별 횟수·간격·실제 `event_id` 근거와 조회 제한을 명시 | 주기적인 외부 통신을 조사하는 도구를 문서 담당자가 기록 담당자 영역에 교차 구현 | 🔍 기록 담당자 리뷰 대기 (미완료) |
+| D2-7 `get_network_connections(host, minutes)` 추가: 외부 IP별 횟수·간격·실제 `event_id` 근거와 조회 제한을 명시 | 주기적인 외부 통신을 조사하는 도구를 문서 담당자가 기록 담당자 영역에 교차 구현 | 🔍 기록 담당자 리뷰 완료·승인 (개선 2건은 아래 행) |
+| `get_network_connections`에 `min_interval_seconds`, `max_interval_seconds`, `interval_stddev_seconds`와 선택 인자 `until_ts` 추가. mock에는 넣지 않음 | 평균 간격만으로는 비컨과 정상 통신을 구분할 수 없다(시뮬레이터 WS-010 10분 창에서 비컨 30.0초, 정상 SaaS 26.72초). 현재 시각 기준 조회는 오래된 알림에서 "통신 없음"과 구분되지 않는 빈 결과를 낸다 | 🔍 제안·반영 완료(코드·테스트·문서). **📘 이동원 확인 대기, 둘 다 동의한 것은 아님** |
 
