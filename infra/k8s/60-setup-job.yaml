@@ -1,0 +1,47 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: setup
+  namespace: soc
+spec:
+  completions: 1
+  parallelism: 1
+  backoffLimit: 2
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: ghcr-pull
+      initContainers:
+        - name: wait-opensearch
+          image: ghcr.io/leedongwon9812/edr-ai-triage-lab1:day2-stage1-8aab319
+          command:
+            - python
+            - -c
+            - |
+              import json, time, urllib.request
+              url = 'http://opensearch.soc.svc.cluster.local:9200/_cluster/health?wait_for_status=yellow&timeout=5s'
+              while True:
+                  try:
+                      with urllib.request.urlopen(url, timeout=10) as r:
+                          health = json.load(r)
+                      if not health.get('timed_out', True) and health['status'] in ('yellow', 'green'):
+                          print('OpenSearch ready', flush=True)
+                          break
+                  except Exception as e:
+                      print(type(e).__name__, flush=True)
+                  time.sleep(5)
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 200m, memory: 128Mi}
+      containers:
+        - name: setup
+          image: ghcr.io/leedongwon9812/edr-ai-triage-lab1:day2-stage1-8aab319
+          command: [python, -m, soc.setup]
+          envFrom:
+            - configMapRef: {name: soc-app-config}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}

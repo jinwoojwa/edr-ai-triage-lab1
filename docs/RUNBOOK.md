@@ -182,6 +182,83 @@ API 매니페스트 적용 후 `deployment.apps/api 1/1`이었다. API는 기존
 
 **4단계 결과:** 실제 이벤트 기록 → 경보 생성 → 실제 텔레메트리 도구 조회 → 가짜 LLM 판정 → Postgres 체크포인트와 승인 대기까지 확인했다. 실제 LLM의 판정 품질과 실KB 검색, 사람의 최종 승인·조치 실행은 이번 검증 범위 밖이다. 4-3의 공동 진단 후 나눔은 남아 있다.
 
+## 서버 인프라 5단계: `/healthz` 전용 Ingress (2026-11-18)
+
+**사전 확인:** `Resolve-DnsName soc.1.201.110.16.nip.io -Type A`는 `1.201.110.16`을 반환했고, `Test-NetConnection 1.201.110.16 -Port 80 -InformationLevel Quiet`는 `True`였다. 적용 전 `http://1.201.110.16/healthz`는 404(`404 page not found`)였다. `IngressClass`는 `traefik (default)`이고 기존 Ingress는 없었다. `soc/api` Service는 80번 포트를 열고 EndpointSlice는 API Pod의 `10.42.0.27:8000`을 가리켰다. 내부 API의 `/healthz`는 `{"status":"ok","backend":"real"}`, `/readyz`는 `{"ready":true,"opensearch":true,"postgres":true}`였다.
+
+**적용 명령과 결과 (PowerShell):**
+
+```powershell
+$kubeconfig = 'C:\Users\Admin\.kube\edr-team.yaml'
+$manifest = 'D:\workspace\03-projects\edr-ai-triage-lab1\infra\k8s\50-ingress.yaml'
+kubectl --kubeconfig $kubeconfig apply --dry-run=server -f $manifest
+kubectl --kubeconfig $kubeconfig apply -f $manifest
+kubectl --kubeconfig $kubeconfig -n soc get ingress api-health -o wide
+kubectl --kubeconfig $kubeconfig -n soc describe ingress api-health
+Invoke-WebRequest 'http://soc.1.201.110.16.nip.io/healthz' -UseBasicParsing
+```
+
+서버 dry-run은 `ingress.networking.k8s.io/api-health created (server dry run)`, 실제 적용은 `ingress.networking.k8s.io/api-health created`였다. Ingress는 `CLASS=traefik`, `HOSTS=soc.1.201.110.16.nip.io`, `PORTS=80`으로 표시됐고, `describe`의 `/healthz` 백엔드는 `api:80 (10.42.0.27:8000)`, 이벤트는 없었다. `ADDRESS=192.168.0.173`은 서버의 내부 주소이며, 외부 호스트의 실제 응답으로 공인 IP 경로를 검증했다. 로컬 `kubectl diff -f $manifest`는 Windows PATH에 `diff` 실행 파일이 없어 실패했다. 이후 서버 dry-run과 실제 응답으로 검증했다.
+
+**외부 검증:** `http://soc.1.201.110.16.nip.io/healthz`는 HTTP 200과 `{"status":"ok","backend":"real"}`을 반환했다. 공인 IP에 `Host: soc.1.201.110.16.nip.io` 헤더를 넣어도 200이었다. 잘못된 `Host: wrong.example`은 404(`404 page not found`)였다. 같은 공개 호스트에서 `/healthz/extra`, `/approvals`, `/docs`, `/dify/retrieval`은 모두 404였다. 따라서 `Exact /healthz`만 라우팅됐다. 배포 전후 기존 API·generator·worker·OpenSearch·Postgres Pod는 모두 `1/1 Running`이었고 PVC 두 개는 `Bound`였다.
+
+**장애 진단과 복구:** 요청 Host를 잘못 지정해 404를 재현했다. DNS A 레코드, TCP 80, Ingress의 `HOSTS`·`PATHS`, Service의 포트·EndpointSlice 순서로 확인한 뒤 올바른 Host로 요청하니 200으로 복구됐다. Ingress를 수정하거나 서버 운영체제·UFW·가비아 보안 그룹을 변경하지 않았다. 🔍 기록 담당자가 부재 중이므로 장애 공동 진단과 교차 검토는 미완료다.
+
+## 인프라 6단계: setup·KB 적재 Job (2026-11-19)
+
+서버의 기존 API·워커·생성기·OpenSearch·Postgres는 모두 재시작 0회로 실행 중이었다. 노트북 Docker 엔진이 꺼져 있어 기존 Docker Desktop을 시작했다. OS·UFW·가비아 보안 그룹·k3s 전역 설정은 변경하지 않았다. 사용자 승인을 받고 로컬 `.env`의 OpenAI 키를 값 노출 없이 기존 `soc-app-secrets`의 `OPENAI_API_KEY`에 추가했다.
+
+`60-setup-job.yaml`, `61-kb-ingest-job.yaml`은 서버 dry-run에서 모두 `created (server dry run)`이었다. setup은 `python -m soc.setup`으로 실행했고, `setup`과 별도 이름 `setup-repeat-20261119` 모두 `Complete`였다. 두 로그는 `인덱스 준비 완료: edr-events-* 템플릿, 알림, 리포트`였다. 기존 리포트 `al-f75e6b7d790d`의 내용·버전이 전후 동일했으며 템플릿 `edr-events`가 존재했다. 서비스가 계속 새 경보를 만들기 때문에 전체 건수 동일 여부는 멱등성 기준으로 사용하지 않았다.
+
+배포 전 서버에는 `kb-*` 인덱스·별칭이 없었다. OpenSearch `yellow`는 `top_queries-2026.11.19-89290`의 복제본 1개 미할당 때문이며 모든 기본 샤드는 `STARTED`였다. 기존 인덱스 설정은 변경하지 않았다. KB 적재는 별도 후보 `kb-playbooks-d3-candidate-20261119`에 수행하며 API·워커의 mock 설정과 연결하지 않는다.
+
+### 6단계 실행 명령 (프로젝트 루트 PowerShell)
+
+```powershell
+$kc = 'C:\Users\Admin\.kube\edr-team.yaml'
+docker build -f Dockerfile.kb -t ghcr.io/leedongwon9812/edr-ai-triage-lab1-kb:day3-stage6-20261119-ocr .
+docker push ghcr.io/leedongwon9812/edr-ai-triage-lab1-kb:day3-stage6-20261119-ocr
+kubectl --kubeconfig $kc apply --dry-run=server -f infra/k8s/60-setup-job.yaml -f infra/k8s/61-kb-ingest-job.yaml
+kubectl --kubeconfig $kc apply -f infra/k8s/60-setup-job.yaml
+kubectl --kubeconfig $kc -n soc wait --for=condition=complete job/setup --timeout=300s
+kubectl --kubeconfig $kc -n soc logs job/setup
+
+# 아래 생성 명령은 새 이름일 때만 사용. 이미 실행한 Job은 먼저 상태·로그를 확인한다.
+$dry = kubectl --kubeconfig $kc create --dry-run=client -f infra/k8s/61-kb-ingest-job.yaml -o json | ConvertFrom-Json
+$dry.metadata.name = 'kb-ingest-dryrun-ocr-20261119'
+$dry.spec.template.spec.containers[0].command = @('python','-m','soc.kb.ingest','--dry-run','--show','3')
+$dry | ConvertTo-Json -Depth 40 | kubectl --kubeconfig $kc create -f -
+kubectl --kubeconfig $kc -n soc logs job/kb-ingest-dryrun-ocr-20261119
+# 9종 청크 결과 검토 후 본 적재 실행
+kubectl --kubeconfig $kc apply -f infra/k8s/61-kb-ingest-job.yaml
+kubectl --kubeconfig $kc -n soc wait --for=condition=complete job/kb-ingest --timeout=1800s
+kubectl --kubeconfig $kc -n soc logs job/kb-ingest
+```
+
+KB 이미지의 로컬 크기는 4,163,089,047바이트였다. GHCR 게시 digest는 `sha256:27bc9c4b78c7a47263db8a8c7d1aa6bd5bc4a5e79501910bd0a1057e707a6cec`다. 이미지에서 PDF 9개, Unstructured import, OCR 언어 `eng/kor/osd`, `/app/.env` 미포함을 확인했다. 최초 서버 pull에는 수 분이 걸릴 수 있으며 로그 조회가 `PodInitializing`이면 Pod 이벤트에서 `Pulling`인지 먼저 확인한다.
+
+### 6단계 검증 결과와 발견한 문제
+
+첫 dry-run `kb-ingest-dryrun-20261119`는 Job 자체는 92초에 완료됐지만 06번 스캔 PDF가 요소·청크 0개여서 내용 검증은 실패했다. 사용자가 `src/soc/kb/parse.py` 추가 수정을 승인했다. fast 결과에 텍스트가 전혀 없을 때만 `ocr_only`로 재시도하도록 수정했고, 정상 fast 결과 유지와 빈 결과 OCR 재시도를 이미지 안의 mock 검사로 확인했다. 01·09번의 fast 표 복원 경로는 유지됐다. 수정 이미지는 `day3-stage6-20261119-ocr`, digest `sha256:0080aa507e2049fc682ea896591b526ff52c3ed02f1aabe1cfcb38a3b93f7beb`이며 매니페스트도 이 태그를 사용한다.
+
+| 검증 | 실제 결과 |
+| --- | --- |
+| setup / setup-repeat-20261119 | 각각 6초, Complete 1/1; 기존 리포트 내용·버전 동일 |
+| 수정 후 dry-run | `kb-ingest-dryrun-ocr-20261119`, 30초, Complete 1/1; 9종 121개 청크 |
+| 본 적재 | `kb-ingest`, 28초, Complete 1/1; 실제 `text-embedding-3-small` 벡터 121건 저장 |
+| 검색 검증 | `kb-verify-20261119`, 14초, Complete 1/1; 9종 출처·1536차원·cosinesimil 매핑 확인 |
+| Recall@3 (21문항) | 키워드 18/21=0.857, 벡터 16/21=0.762, 하이브리드 18/21=0.857 |
+
+출처별 저장 건수: 01번 14, 02번 2, 03번 3, 04번 2, 05번 2, 06번 1, 07번 2, 08번 3, 09번 92개. `_refresh` 후 실제 count 121개를 확인했다. 후보 인덱스는 복제본 0개, 원본 데이터 크기는 측정 당시 3,300,652바이트였다.
+
+검색 검증 Job은 본 적재 매니페스트의 이미지·환경변수를 재사용하고, 프로젝트의 `search_playbook`, `rag_eval.load_questions`, `rag_eval.evaluate`를 직접 호출했다. `rag_eval`의 기본 QUESTIONS 경로는 이미지에서 `/app/src/data/kb/...`로 해석되므로 검증 시 `load_questions(Path('/app/data/kb/eval_questions.jsonl'))`로 실제 경로를 명시했다. 평가 코드 파일은 수정하지 않았다. `search_playbook('격리는 누가 승인해?', 3)`은 실제 01번 정책 PDF 1쪽의 청크를 반환했지만, 상위 결과에 헤더·다른 조치 행도 포함됐다. 이 결과만으로 격리 승인권자 답이 정확하다고 판정하지 않는다.
+
+**남은 품질 문제:** OCR로 06번이 저장되었지만 한글이 일부 깨져 원문의 완전한 복원으로 볼 수 없다. 하이브리드 실패 문항은 `k10`(06번 스캔본), `k13`·`k14`(08번 영어 문서)다. 청크 수와 Job Complete는 검색 품질의 대체 지표가 아니다. 파싱·검색 고도화와 최종 답 정확도 평가는 후속 작업이다. PDF FontBBox 경고는 있었지만 Job 종료 오류는 없었다.
+
+**배포 후 상태:** 10:47 KST 기준 기존 5개 서비스 Pod는 모두 1/1 Running·재시작 0회, 두 PVC는 Bound, API `/readyz`의 OpenSearch·Postgres는 모두 true였다. 공인 `/healthz`는 HTTP 200과 `backend=real`이었다. API·워커 설정은 `FAKE_LLM=true`, `KB_TOOLS=mock`으로 유지되며, 이번 결과는 실제 임베딩 적재·검색 검증이다. 에이전트의 실LLM/실KB 전환과 외부 docs 공개는 수행하지 않았다.
+
+Job은 완료 후 86400초에 자동 정리된다. `kubectl -n soc get jobs`, `kubectl -n soc logs job/kb-ingest`, `kubectl -n soc logs job/kb-verify-20261119`로 TTL 전 결과를 확인한다. Job 삭제 후에도 OpenSearch 후보 인덱스는 남는다. 재적재할 때는 새 Job 이름·새 후보 인덱스를 사용한다. 기록 담당자 교차 리뷰는 미완료다.
+
 ## 공통 1차 확인
 ```bash
 kubectl -n soc get pods,svc,ingress,pvc,jobs

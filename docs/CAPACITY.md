@@ -62,6 +62,32 @@ OpenSearch PVC는 `local-path`·`ReadWriteOnce`·20Gi로 시작한다. 루트 �
 
 OpenSearch 시작·재시작 직후에는 CPU 1111m 및 1983m도 관측했다. 위 25m는 한 시점의 안정화 후 사용량이며, 피크나 장기 평균이 아니다. 디스크 사용량은 배포 전 3.7G에서 6.1G로 증가했지만 이미지·로그·데이터 중 각 항목의 기여량은 분리 측정하지 않았다. Postgres 등 후속 워크로드를 배포하기 전에 이 실측값으로 예산을 다시 조정한다.
 
+## 인프라 6단계 Job 자원 계획·배포 전 실측
+
+2026-11-19 10:36 KST, 서버 SSH 명령 `free -h`, `df -h /` 및 `kubectl top nodes`로 측정했다. 메모리 전체 15Gi·사용 3.1Gi·available 12Gi, swap 0B였다. 루트 디스크 48G 중 사용 6.8G·여유 41G(15%)였다. 노드 사용량은 91m·3258Mi(20%), 기존 Pod 예약은 CPU 1400m·메모리 3724Mi, 메모리 limits 5290Mi였다.
+
+| Job | CPU request / limit | 메모리 request / limit | 실행 방침 |
+| --- | --- | --- | --- |
+| setup | 100m / 500m | 128Mi / 256Mi | 2회 순차 실행, 재시도 최대 2회 |
+| kb-ingest | 500m / 2 | 1Gi / 4Gi | dry-run·본 적재·검색 검증을 순차 실행, 자동 재시도 없음 |
+
+initContainer는 50m/200m, 64Mi/128Mi이며 본 컨테이너와 순차 실행한다. KB Job 1개 실행 시 기존 예약과 합쳐 CPU requests 1900m·메모리 requests 4748Mi다. CPU 전용 torch를 포함한 별도 KB 이미지를 사용하고 API·워커 이미지는 유지한다. 실제 이미지 크기·적재 사용량은 실행 후 추가 기록한다.
+
+### 인프라 6단계 배포 후 실측 (2026-11-19 10:47 KST)
+
+| 항목 | 실측 |
+| --- | --- |
+| 최종 KB 이미지 로컬 크기 | 4,163,089,185바이트 (약 4.16GB); CPU 전용 torch |
+| 서버 메모리 (`free -h`) | 사용 3.2Gi, available 12Gi, swap 0B |
+| 루트 디스크 (`df -h /`) | 사용 11G, 여유 37G, 23%; 사전 사용 6.8G 대비 약 4.2G 증가 |
+| 노드 (`kubectl top nodes`) | CPU 127m, 메모리 3296Mi(20%) |
+| API / generator / worker | 메모리 76Mi / 69Mi / 69Mi |
+| OpenSearch / Postgres | 메모리 1596Mi / 106Mi |
+| 후보 KB 인덱스 | 121문서, primary store 3,300,652바이트, 복제본 0 |
+| 본 적재 중 관측한 cgroup `memory.peak` | 777,768,960바이트 (약 742MiB) |
+
+본 적재는 28초에 완료됐다. 실행 중 `kubectl exec job/kb-ingest -- cat /sys/fs/cgroup/memory.peak`를 여러 번 읽어 415,424,512 → 494,080,000 → 777,768,960바이트를 관측했다. 마지막 관측 이후의 전체 실행 최종 피크를 보장하지 않는다. metrics-server는 짧게 실행된 Job의 메트릭을 수집하지 못해 Job CPU 피크는 측정하지 못했다. Job 4Gi limit 이내에서 OOM·재시작 없이 완료됐다. 디스크 증가에는 이미지 레이어·스냅샷·로그·일반 서비스 데이터가 포함되며 각각의 기여량은 분리하지 않았다. Job TTL 정리는 이미지 캐시나 KB 인덱스를 삭제하지 않는다.
+
 ## 인프라 3단계 배포 후 실측
 
 **2026-11-18 17:27 KST**, Postgres와 실모드 API를 배포하고 승인 재개 시험을 마친 뒤 측정했다. Postgres는 CPU request 250m, 메모리 request 512Mi / limit 1Gi, PVC `local-path` 10Gi다. API는 CPU request 100m, 메모리 request 256Mi / limit 512Mi다. OpenSearch 설정은 그대로다.
