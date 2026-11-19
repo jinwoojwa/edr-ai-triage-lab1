@@ -83,7 +83,7 @@ def healthz():
     return {"status": "ok", "backend": settings.backend}
 
 
-@app.get("/readyz")
+@app.get("/readyz", include_in_schema=False)
 def readyz():
     checks = {"opensearch": False, "postgres": pg_ping()}
     try:

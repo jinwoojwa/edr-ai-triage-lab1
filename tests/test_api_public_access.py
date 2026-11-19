@@ -36,6 +36,7 @@ def test_openapi_protects_only_triage_and_contains_no_secret(client):
                  for method, op in ops.items() if isinstance(op, dict) and op.get("security")]
     assert protected == [("/alerts/{alert_id}/triage", "post")]
     assert "test-only-public-access-key" not in str(schema)
+    assert "/readyz" not in schema["paths"]
     assert schema["components"]["securitySchemes"]["TriageAPIKey"]["scheme"] == "bearer"
 
 
