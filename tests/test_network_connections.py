@@ -1,5 +1,6 @@
 """D2-7 외부 네트워크 연결 도구: 집계 계약과 실제 OpenSearch 조회."""
 from datetime import datetime, timedelta, timezone
+from statistics import fmean, pstdev
 from uuid import uuid4
 
 import pytest
@@ -114,6 +115,60 @@ def test_event_limit_marks_partial_counts(monkeypatch):
     assert result["truncated"] is True
     assert result["connections"][0]["count"] == 2
     assert [e["event_id"] for e in result["connections"][0]["events"]] == ["b", "c"]
+
+
+STAT_KEYS = ("avg_interval_seconds", "min_interval_seconds", "max_interval_seconds", "interval_stddev_seconds")
+
+
+def test_interval_statistics_tell_regular_from_irregular(monkeypatch):
+    """평균 간격만으로는 비컨과 정상 통신이 구분되지 않는다 → 표준편차와 최소·최대를 함께 돌려준다."""
+    gaps = [10, 100, 5]
+    regular = [event(f"r{i}", -300 + i * 30, "198.51.100.23") for i in range(5)]       # 간격 30초 x 4
+    irregular, t = [event("i0", -290, "203.0.113.40")], -290
+    for i, gap in enumerate(gaps, 1):
+        t += gap
+        irregular.append(event(f"i{i}", t, "203.0.113.40"))
+    stub_search(monkeypatch, regular + irregular)
+
+    by_ip = {c["dst_ip"]: c for c in tools.get_network_connections("WS-NET", 6)["connections"]}
+    beacon, normal = by_ip["198.51.100.23"], by_ip["203.0.113.40"]
+    assert tuple(beacon[k] for k in STAT_KEYS) == (30.0, 30.0, 30.0, 0.0)
+    assert normal["avg_interval_seconds"] == round(fmean(gaps), 2)
+    assert (normal["min_interval_seconds"], normal["max_interval_seconds"]) == (5.0, 100.0)
+    assert normal["interval_stddev_seconds"] == round(pstdev(gaps), 2)
+    assert normal["interval_stddev_seconds"] > beacon["interval_stddev_seconds"]
+
+
+def test_interval_statistics_for_one_and_two_events(monkeypatch):
+    stub_search(monkeypatch, [event("one", -50, "203.0.113.40"),
+                              event("p1", -100, "198.51.100.23"), event("p2", -40, "198.51.100.23")])
+    by_ip = {c["dst_ip"]: c for c in tools.get_network_connections("WS-NET", 2)["connections"]}
+    assert all(by_ip["203.0.113.40"][k] is None for k in STAT_KEYS)                      # 한 건: 간격 없음
+    assert tuple(by_ip["198.51.100.23"][k] for k in STAT_KEYS) == (60.0, 60.0, 60.0, 0.0)  # 두 건: 간격 하나
+
+
+def test_until_ts_moves_the_window(monkeypatch):
+    """오래된 알림은 until_ts로 알림 시각까지를 조사한다. 생략하면 현재 시각 기준이다."""
+    stub_search(monkeypatch, [event("old-a", -3600 - 60, "198.51.100.23"),
+                              event("old-b", -3600 - 30, "198.51.100.23"),
+                              event("recent", -30, "198.51.100.23")])
+    until = (T0 - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+
+    old = tools.get_network_connections("WS-NET", 2, until_ts=until)
+    assert (old["from"], old["to"]) == ("2026-11-16T08:58:00Z", "2026-11-16T09:00:00Z")
+    assert set(_ids(old)) == {"old-a", "old-b"}
+
+    now = tools.get_network_connections("WS-NET", 2)
+    assert now["to"] == "2026-11-16T10:00:00Z" and set(_ids(now)) == {"recent"}
+
+
+def test_until_ts_converts_timezone_and_rejects_bad_values(monkeypatch):
+    stub_search(monkeypatch, [])
+    kst = tools.get_network_connections("WS-NET", 2, until_ts="2026-11-16T18:00:00+09:00")
+    assert kst["to"] == "2026-11-16T09:00:00Z"
+    for bad in ("", "abc", "2026-11-16T09:00:00", 123):
+        with pytest.raises(ValueError):
+            tools.get_network_connections("WS-NET", 2, until_ts=bad)
 
 
 @pytest.mark.skipif(settings.backend != "real", reason="실제 OpenSearch 통합 검사")
