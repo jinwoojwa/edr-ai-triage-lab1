@@ -205,6 +205,20 @@ API와 worker를 `FAKE_LLM=false`, `KB_TOOLS=real`로 전환하고 검증된 후
 
 이번 작업은 허용된 설정·검증 Job·문서 5개 파일만 변경했다. 서버 OS·방화벽·Secret은 변경하지 않았다. 다음 순서는 CI/CD 구축, 그 뒤 인증·HTTPS를 갖춘 외부 docs/API 공개다. 사람 승인 장치는 유지하며 교차 리뷰는 미완료다.
 
+### 인프라 7단계 CI/CD 설계와 검증 (2026-11-19)
+
+사용자 결정에 따라 Dify 플랫폼·점수 정규화·Dify 테스트는 제외한다. 나머지 기존 테스트를 격리된 OpenSearch 2.19.0·Postgres 16에서 실행한다. 로컬 검증은 **67 passed, 0 skipped (12.43초)**였다. Postgres 테스트용 DB 생성과 API 재시작 후 승인 재개까지 실제 실행했다. 모델 품질·실제 LLM 호출은 이 CI 결과로 평가하지 않는다.
+
+코드 push/PR은 test를 수행하고 trusted main만 게시·배포한다. 문서만 변경한 push는 제외한다. test 실패 또는 예상하지 않은 skip은 build·deploy를 막는다. 고정된 공식 Actions commit을 사용하며 GHCR에는 SHA 7자리 tag와 전체 commit label을 기록한다. 같은 tag가 있으면 전체 SHA를 검사하고 digest를 재사용한다. 다른 커밋의 동일 7자리 tag는 덮어쓰지 않는다. 단일 linux/amd64 manifest를 게시해 실제 Pod imageID와 digest를 직접 대조한다.
+
+API에만 maxUnavailable=0·maxSurge=1·revisionHistoryLimit=5·progressDeadlineSeconds=240을 명시한다. rollout은 300초 기다린다. 새 API Pod 한 개에 requests CPU 100m·메모리 256Mi의 여유가 필요하다. 워커·생성기·DB·PVC·Job·실제 LLM/KB 설정은 자동 갱신하지 않는다. API와 워커의 코드 버전이 달라질 수 있으므로 공통 프로토콜 변경은 별도 배포 범위로 잡는다.
+
+Environment `soc`의 승인 후 기존 SSH 경로로 배포하며, known_hosts 검증과 전용 키를 사용한다. 공개 6443 추가 개방은 필요 없다. 전용 SSH 공개 키의 authorized_keys 등록은 서버 설정 변경이므로 사용자 승인 후 수행한다. ubuntu 키는 sudo 권한이 있으므로 단순 restrict 옵션을 최소 권한 계정으로 표현하지 않는다. 비밀 값은 저장소·artifact에 남기지 않는다.
+
+이전 정상 revision을 기록하고 CI가 렌더링한 API 매니페스트만 dry-run·apply한다. 새 이미지의 Pod health/ready와 digest, 외부 health를 확인한다. 실패 시 원인 수정 전에 기록한 정상 revision으로 undo하며 복구 성공도 최초 실패를 성공으로 바꾸지 않는다. 자동 undo는 Kubernetes 자체 기능이 아니라 이번 스크립트의 동작이다. ConfigMap·Secret·DB는 undo 범위가 아니다.
+
+실제 Actions 게시·승인 배포·이미지 고장 및 복구 검증은 접속/게시 승인을 기다린다. 구현만으로 인프라 7단계 완료를 기록하지 않는다. 외부 공개는 `/healthz`만 유지한다. 옆 팀 검증과 기록 담당자 교차 리뷰는 미완료다.
+
 ### 평가: 기준점(2일차)과 최종(3일차)
 
 | 지표 | 기준점 (2일차, 2026-11-18) | 최종 | 바뀐 이유 |

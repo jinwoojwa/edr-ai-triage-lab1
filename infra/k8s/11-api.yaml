@@ -5,6 +5,13 @@ metadata:
   namespace: soc
 spec:
   replicas: 1
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 240
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: api
@@ -17,6 +24,7 @@ spec:
         - name: ghcr-pull
       containers:
         - name: api
+          # CI replaces this deployed baseline with the tested SHA tag and digest.
           image: ghcr.io/leedongwon9812/edr-ai-triage-lab1:day2-stage1-8aab319
           imagePullPolicy: Always
           ports:

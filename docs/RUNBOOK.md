@@ -325,6 +325,58 @@ OS·UFW·가비아 보안 그룹·Secret·앱 이미지·기존 프로브는 변
 
 생성기 복원 후 자연 생성된 경보 `al-170635837113`·`al-9397d8e1a798`도 실제 워커가 각각 13.5초·11.6초에 승인 대기로 처리했다. 마지막 관측에서 워커 메트릭은 processed=1·pending_approval=3·failed=0이었고 다음 경보를 처리 중이었다. 이는 초기 테스트 표의 비용 합계에 포함하지 않았다.
 
+## 인프라 7단계 — CI → GHCR → API 배포 → 롤백 (2026-11-19)
+
+### 변경 범위와 현재 진행 상태
+
+허용된 `.github/workflows/ci.yml`, `infra/scripts/deploy.sh`, `infra/k8s/11-api.yaml`, 이 문서, `docs/DECISIONS.md`, `docs/DEPLOYMENT.md`의 6개 파일만 변경한다. Dify 제외, API만 자동 배포한다. 기존 LLM·KB·worker·generator·Secret·ConfigMap·PVC·Ingress 범위는 유지한다. 서버 키 등록과 Git 게시 승인은 별도로 확인한다.
+
+### 로컬 CI 게이트 실행 결과
+
+운영과 분리된 Docker 컨테이너 `stage7-ci-opensearch`(2.19.0, 127.0.0.1:19270), `stage7-ci-postgres`(16, 127.0.0.1:15470)를 사용했다. 일회용 DB 생성 권한을 가진 CI 전용 계정이며 실제 모델 키는 주입하지 않았다.
+
+```powershell
+$env:OPENSEARCH_URL='http://127.0.0.1:19270'
+$env:POSTGRES_DSN='postgresql://soc:ci-only-password@127.0.0.1:15470/soc'
+.\.venv\Scripts\python.exe -m pytest -q --ignore=tests/test_dify.py --junitxml=<프로젝트-밖-임시폴더>/stage7-test-results.xml
+# 67 passed in 12.43s, 0 skipped
+```
+
+DB 미연결 상태의 최초 실행은 63 passed·4 skipped였다. 이 결과는 CI 완료 근거로 쓰지 않고 격리 DB를 준비해 67개 전부 재검증했다. workflow는 사전 연결과 JUnit skip·필수 재개 테스트 누락을 검사한다. test 실패면 needs에 의해 build·deploy가 시작되지 않는다. CI 사용자는 Postgres 일회용 DB를 만들 수 있어야 한다.
+
+### 최초 실행 준비 및 승인 경계
+
+1. 현재 `dongwon`과 원격 main의 관계를 확인한다. 확인 시 로컬 HEAD `f3f9aca`는 main `edd19cf`보다 32커밋 앞서고 뒤처진 커밋은 0개였다. 기존 작업까지 main에 공개하게 되므로 Git 게시 전에 범위를 확인한다. 기존 미추적 계획서와 Dify 문서는 커밋 대상에서 제외한다.
+2. 승인 후 전용 CI SSH 키를 서버에 등록하고 GitHub Environment `soc`에 SSH_HOST·SSH_USER·SSH_PRIVATE_KEY·SSH_KNOWN_HOSTS를 등록한다. Environment reviewer 승인 단계를 둔다. 기존 개인 키나 클러스터 kubeconfig를 임의 업로드하지 않는다.
+3. 허용된 파일을 검증·커밋한 뒤 승인된 main에 push한다. GitHub Actions test → build → 배포 승인 → deploy 순서로 진행한다. main에서 수동 실행할 때 `rollback_drill=true`를 선택하면 이미지 고장·복구 실습을 포함한다.
+4. 실행 URL·테스트 수·SHA·digest·revision·복구 초·public-health 표본을 실제 로그에서 아래 기록란에 추가한다. 아직 실행하지 않은 결과를 성공으로 기록하지 않는다.
+
+### 배포·실패 진단·복구
+
+스크립트는 서버의 `sudo -n k3s kubectl`·python3·flock을 사용한다. API Deployment·Service만 렌더링해 전달하며 임시 파일에는 Secret이 없다. GitHub concurrency와 `/tmp/soc-api-deploy.lock`으로 동시 배포를 방지한다. known_hosts가 불일치하면 지문부터 확인하며 검증을 끄지 않는다.
+
+새 이미지가 실패하면 기존 Ready Pod를 유지하고 이전 revision으로 undo한다. `rollback_drill=true`는 존재하지 않는 이미지의 rollout 45초 실패·기존 Ready 이미지 확인·정상 revision 복구를 수행한다. 외부 `/healthz`를 약 2초마다 표본 관측해 deployment-evidence artifact로 남긴다. 외부 smoke 실패는 별도 rollback 호출로 복구하며 실행 결과는 실패로 남긴다.
+
+```bash
+sudo k3s kubectl -n soc rollout history deployment/api
+sudo k3s kubectl -n soc get deployment api -o jsonpath='{.spec.template.spec.containers[0].image}'
+sudo k3s kubectl -n soc get pods -l app=api -o wide
+sudo k3s kubectl -n soc describe pod <실패한-Pod>
+# 로그의 PREVIOUS_REVISION으로 되돌림. 예시의 자리표시자는 실제 숫자로 대체
+sudo k3s kubectl -n soc rollout undo deployment/api --to-revision=<정상-revision>
+sudo k3s kubectl -n soc rollout status deployment/api --timeout=300s
+```
+
+Pod template annotation `soc.lab/commit`·OCI revision label은 전체 SHA, 이미지 tag는 7자리다. Pod imageID가 게시 digest와 같아야 새 코드 검증으로 인정한다. 외부 health 200만으로는 새 Pod 배포 성공을 판정하지 않는다. 승인 체크포인트·기존 리포트·PVC도 배포 전후 확인한다. port-forward는 Pod 교체로 끊길 수 있으므로 필요하면 `18002:80`을 다시 실행한다.
+
+### 실제 원격 실행 기록
+
+사용자가 전용 SSH 키 등록과 dongwon·main 게시(기존 32커밋 포함)를 승인했다. CI 전용 ed25519 공개 키만 ubuntu authorized_keys에 restrict 옵션으로 추가했고, 전용 키의 SSH·sudo k3s 조회를 확인했다. 기존 개인 키는 업로드하지 않았다. GitHub Environment soc에 main branch 제한·required reviewer와 네 SSH Secrets를 등록했다. OS·UFW·가비아 보안 그룹·기존 클러스터 Secret은 변경하지 않았다.
+
+현재 상태: 로컬 테스트 67개 통과, JUnit 필수 통합 테스트·skip 0 확인, actionlint 1.7.12·bash -n·ShellCheck warning 이상 검사·embedded Python 구문·git diff --check 모두 통과했다. 서버 read-only 사전 점검에서 python3·flock·sudo k3s kubectl 사용 가능, API 1/1, PVC 20Gi·10Gi Bound였다. 원격 게시·배포·고장 복구는 승인 및 실제 실행 대기다. workflow URL·신규 SHA/digest·revision·복구 시간은 아직 없다. 교차 진단 나눔과 옆 팀 검증도 미완료다.
+
+`11-api.yaml`의 소스 기본 이미지는 현재 실행 중인 유효한 수동 태그를 유지한다. CI가 이 파일을 읽고 테스트한 새 SHA tag@digest로 렌더링한 결과만 적용한다. 아직 게시되지 않은 SHA를 기본값으로 적어 수동 apply 시 pull 오류가 생기게 하지 않는다. 이후에도 CI 적용 결과를 이 기본 파일로 덮어쓰지 않는다.
+
 ## 공통 1차 확인
 ```bash
 kubectl -n soc get pods,svc,ingress,pvc,jobs
