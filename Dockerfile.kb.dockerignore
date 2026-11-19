@@ -1,0 +1,13 @@
+**
+!requirements.txt
+!requirements-kb.txt
+!src/
+!src/**
+!data/
+!data/kb/
+!data/kb/**
+**/__pycache__
+**/*.pyc
+**/.env
+**/*.pem
+**/*.key

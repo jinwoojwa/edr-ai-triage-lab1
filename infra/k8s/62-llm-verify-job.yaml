@@ -1,0 +1,132 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: llm-verify-20261119
+  namespace: soc
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: verify
+          image: ghcr.io/leedongwon9812/edr-ai-triage-lab1:day2-stage1-8aab319
+          envFrom:
+            - configMapRef: {name: soc-app-config}
+          env:
+            - {name: FAKE_LLM, value: 'false'}
+            - {name: KB_TOOLS, value: real}
+            - {name: TELEMETRY_TOOLS, value: real}
+            - {name: CHECKPOINTER, value: postgres}
+            - {name: CHAT_MODEL, value: gpt-4o-mini}
+            - {name: EMBED_MODEL, value: text-embedding-3-small}
+            - {name: EMBED_DIM, value: '1536'}
+            - {name: INDEX_KB, value: kb-playbooks-d3-candidate-20261119}
+            - {name: INDEX_EVENTS, value: llm-verify-events-20261119}
+            - {name: INDEX_ALERTS, value: llm-verify-alerts-20261119}
+            - {name: INDEX_REPORTS, value: llm-verify-reports-20261119}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef: {name: soc-app-secrets, key: OPENAI_API_KEY}
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef: {name: soc-app-secrets, key: POSTGRES_DSN}
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: '1', memory: 1Gi}
+          command:
+            - python
+            - -u
+            - -c
+            - |
+              import json, random, subprocess, sys, time, uuid
+              from datetime import datetime, timedelta, timezone
+              from soc.config import settings
+              from soc.agent.llm import get_llm
+              from soc.agent.graph import build_graph, run_config
+              from soc.agent.checkpoint import get_checkpointer
+              from soc.agent.state import DANGEROUS_ACTIONS
+              from soc.alerts import ensure_indices, save_alert, get_report, update_alert
+              from soc.detection.rules import RuleEngine
+              from soc.osclient import get_client
+              from soc.simulator.scenarios import credential_dump, it_inventory_script, reset_ids
+              from soc.telemetry.index_template import build_template, index_events
+              from soc.worker import process
+
+              assert not settings.fake_llm and settings.kb_tools == 'real'
+              llm = get_llm()
+              print('MODEL', json.dumps({'class': type(llm).__name__, 'model': llm.model_name}), flush=True)
+              assert type(llm).__name__ == 'ChatOpenAI'
+              c = get_client()
+              assert c.count(index=settings.index_kb)['count'] == 121
+              c.indices.put_index_template(name=settings.index_events, body=build_template())
+              ensure_indices()
+              graph = build_graph(get_checkpointer())
+              run = uuid.uuid4().hex[:8]
+              summaries = []
+              for number, (scenario, expected) in enumerate(((credential_dump, 'malicious'), (it_inventory_script, 'benign'))):
+                  reset_ids(prefix='llm-' + run + '-' + str(number))
+                  events, truth = scenario('LLM-VERIFY-' + str(number), datetime.now(timezone.utc) - timedelta(minutes=1), random.Random(42))
+                  index_events([e.model_dump(mode='json', exclude_none=True) for e in events], c)
+                  engine = RuleEngine()
+                  alerts = [a for e in events for a in engine.process(e)]
+                  assert alerts, 'Scenario produced no alert'
+                  alert = alerts[0].model_copy(update={'alert_id': 'llm-verify-' + run + '-' + str(number)})
+                  save_alert(alert, c)
+                  data = alert.model_dump(mode='json')
+                  start = time.monotonic()
+                  status = process(graph, data)
+                  cfg = run_config(alert.alert_id)
+                  snapshot = graph.get_state(cfg)
+                  state = snapshot.values
+                  verdict = state['verdict']
+                  playbook = state['playbook']
+                  sources = {p['source'] for p in playbook}
+                  assert playbook and all(p.get('page') and p.get('text') for p in playbook)
+                  assert state['seen_event_ids'], 'No real tool evidence'
+                  known = set(state['seen_event_ids']) | set(data['event_ids'])
+                  assert set(verdict['evidence_event_ids']) <= known
+                  assert state['guardrail']['ok'], state['guardrail']
+                  actions = state['recommendation']['actions']
+                  assert all(not a.get('source') or a['source'] in sources for a in actions)
+                  assert all(a.get('source') and a.get('approver') for a in actions if a['action'] in DANGEROUS_ACTIONS)
+                  metadata = [getattr(m, 'response_metadata', {}) for m in state['messages'] if getattr(m, 'response_metadata', {}).get('model_name')]
+                  assert metadata and state['usage']['input_tokens'] > 0
+                  summary = {'alert_id': alert.alert_id, 'expected': expected, 'verdict': verdict,
+                      'status': status, 'seconds': round(time.monotonic()-start, 2), 'usage': state['usage'],
+                      'trace': state['trace'], 'seen_event_ids': state['seen_event_ids'],
+                      'playbook': playbook, 'recommendation': state['recommendation'], 'model_metadata': metadata}
+                  print('CASE', json.dumps(summary, ensure_ascii=False, default=str), flush=True)
+                  summaries.append({'alert_id': alert.alert_id, 'expected': expected, 'actual': verdict['verdict'], 'seconds': summary['seconds'], 'usage': state['usage']})
+                  if number == 0:
+                      assert snapshot.next == ('approval',), 'Malicious sample did not request risky-action approval'
+                      # Reuse one real recommendation for two isolated approval decisions; no second LLM call.
+                      reject_id = alert.alert_id + '-reject'
+                      reject_alert = alert.model_copy(update={'alert_id': reject_id})
+                      save_alert(reject_alert, c)
+                      copied = dict(state)
+                      copied['alert'] = reject_alert.model_dump(mode='json')
+                      reject_cfg = run_config(reject_id)
+                      graph.update_state(reject_cfg, copied, as_node='recommend')
+                      graph.invoke(None, reject_cfg)
+                      update_alert(reject_id, status='pending_approval')
+                      for aid, approved in ((alert.alert_id, True), (reject_id, False)):
+                          child = '''import json,sys
+              from langgraph.types import Command
+              from soc.agent.graph import build_graph,run_config
+              from soc.agent.checkpoint import get_checkpointer
+              from soc.alerts import save_report,update_alert
+              aid=sys.argv[1]; approved=sys.argv[2]=='true'
+              g=build_graph(get_checkpointer()); cfg=run_config(aid)
+              assert g.get_state(cfg).next==('approval',)
+              out=g.invoke(Command(resume={'approved':approved,'approver':'LLM verification','comment':'isolated test'}),cfg)
+              assert out['report']['approval']['approved'] is approved and not g.get_state(cfg).next
+              save_report(out['report']|{'status':'completed'}); update_alert(aid,status='completed')
+              print('RESUMED',json.dumps({'alert_id':aid,'approved':approved,'status':'completed'}))
+              '''
+                          subprocess.run([sys.executable, '-u', '-c', child, aid, str(approved).lower()], check=True, timeout=60)
+              print('VERIFIED', json.dumps(summaries), flush=True)

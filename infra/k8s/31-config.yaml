@@ -7,7 +7,10 @@ data:
   BACKEND: real
   OPENSEARCH_URL: http://opensearch.soc.svc.cluster.local:9200
   CHECKPOINTER: postgres
-  FAKE_LLM: "true"
+  FAKE_LLM: "false"
   TELEMETRY_TOOLS: real
-  KB_TOOLS: mock
+  KB_TOOLS: real
   CHAT_MODEL: gpt-4o-mini
+  INDEX_KB: kb-playbooks-d3-candidate-20261119
+  EMBED_MODEL: text-embedding-3-small
+  EMBED_DIM: "1536"

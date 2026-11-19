@@ -1,0 +1,253 @@
+name: Test, publish and deploy API
+
+on:
+  push:
+    paths-ignore: ['docs/**', '**/*.md']
+  pull_request:
+    paths-ignore: ['docs/**', '**/*.md']
+  workflow_dispatch:
+    inputs:
+      rollback_drill:
+        description: 'Verify a missing image fails, then restore the verified release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: soc
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: soc
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U soc -d soc"
+          --health-interval 5s --health-timeout 3s --health-retries 30
+      opensearch:
+        image: opensearchproject/opensearch:2.19.0
+        env:
+          discovery.type: single-node
+          DISABLE_SECURITY_PLUGIN: 'true'
+          DISABLE_INSTALL_DEMO_CONFIG: 'true'
+          OPENSEARCH_JAVA_OPTS: '-Xms512m -Xmx512m'
+        ports: ['9200:9200']
+    env:
+      PYTHONPATH: src
+      OPENSEARCH_URL: http://127.0.0.1:9200
+      POSTGRES_DSN: postgresql://soc:ci-only-password@127.0.0.1:5432/soc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Verify isolated databases and shell syntax
+        shell: bash
+        run: |
+          bash -n infra/scripts/deploy.sh
+          python - <<'PY'
+          import json, os, time, urllib.request
+          import psycopg
+          for attempt in range(60):
+              try:
+                  with urllib.request.urlopen(os.environ['OPENSEARCH_URL']+'/_cluster/health?wait_for_status=yellow&timeout=1s', timeout=3) as r:
+                      assert json.load(r)['status'] in ('green','yellow')
+                  with psycopg.connect(os.environ['POSTGRES_DSN'], connect_timeout=3) as c:
+                      assert c.execute('SELECT 1').fetchone()==(1,)
+                  break
+              except Exception:
+                  if attempt == 59:
+                      raise
+                  time.sleep(2)
+          PY
+      - name: Test everything except the excluded Dify integration
+        run: python -m pytest -q --ignore=tests/test_dify.py --junitxml="$RUNNER_TEMP/test-results.xml"
+      - name: Reject skipped or missing integration tests
+        run: |
+          python - <<'PY'
+          import os, xml.etree.ElementTree as ET
+          root=ET.parse(os.path.join(os.environ['RUNNER_TEMP'],'test-results.xml')).getroot()
+          cases=root.findall('.//testcase')
+          assert cases and not root.findall('.//skipped')
+          assert not root.findall('.//failure') and not root.findall('.//error')
+          names={c.attrib['name'] for c in cases}
+          assert {'test_new_saver_resumes_pending_approval', 'test_api_restart_resumes_approval_and_rejection'} <= names
+          print(f'CI_GATE_PASSED: {len(cases)} tests, no skips')
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: test-results
+          path: ${{ runner.temp }}/test-results.xml
+
+  build:
+    needs: test
+    if: github.repository == 'leedongwon9812/edr-ai-triage-lab1' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: publish-${{ github.sha }}
+      cancel-in-progress: false
+    outputs:
+      image: ${{ steps.identity.outputs.image }}
+      digest: ${{ steps.result.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: identity
+        name: Reuse a published SHA without overwriting it
+        shell: bash
+        run: |
+          image="ghcr.io/leedongwon9812/edr-ai-triage-lab1:${GITHUB_SHA:0:7}"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          if docker buildx imagetools inspect "$image" --format '{{json .Manifest}}' > "$RUNNER_TEMP/manifest.json" 2> "$RUNNER_TEMP/inspect.err"; then
+            digest=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["digest"])' "$RUNNER_TEMP/manifest.json")
+            docker pull "$image@$digest"
+            revision=$(docker image inspect "$image@$digest" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
+            test "$revision" = "$GITHUB_SHA"
+            echo "reuse=true" >> "$GITHUB_OUTPUT"
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          elif grep -Eqi 'manifest unknown|not found|404' "$RUNNER_TEMP/inspect.err"; then
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+          else
+            cat "$RUNNER_TEMP/inspect.err" >&2
+            exit 1
+          fi
+      - id: publish
+        if: steps.identity.outputs.reuse == 'false'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ steps.identity.outputs.image }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+      - id: result
+        env:
+          REUSED: ${{ steps.identity.outputs.digest }}
+          BUILT: ${{ steps.publish.outputs.digest }}
+        run: echo "digest=${REUSED:-$BUILT}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: soc
+    concurrency:
+      group: soc-api-deployment
+      cancel-in-progress: false
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      IMAGE: ${{ needs.build.outputs.image }}
+      DIGEST: ${{ needs.build.outputs.digest }}
+      RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      DRILL: ${{ inputs.rollback_drill || false }}
+      PUBLIC_URL: http://soc.1.201.110.16.nip.io/healthz
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Reject an obsolete deployment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          req=urllib.request.Request('https://api.github.com/repos/'+os.environ['GITHUB_REPOSITORY']+'/git/ref/heads/main', headers={'Authorization':'Bearer '+os.environ['GH_TOKEN']})
+          with urllib.request.urlopen(req,timeout=15) as r:
+              assert json.load(r)['object']['sha']==os.environ['GITHUB_SHA'], 'main moved; rerun the latest commit'
+          PY
+      - name: Render only API Deployment and Service
+        run: |
+          python -m pip install PyYAML
+          python - <<'PY'
+          import json, os, yaml
+          docs=list(yaml.safe_load_all(open('infra/k8s/11-api.yaml')))
+          d=next(d for d in docs if d['kind']=='Deployment')
+          d['spec']['template']['spec']['containers'][0]['image']=os.environ['IMAGE']+'@'+os.environ['DIGEST']
+          d['spec']['template']['metadata'].setdefault('annotations',{})['soc.lab/commit']=os.environ['GITHUB_SHA']
+          with open(os.path.join(os.environ['RUNNER_TEMP'],'api.json'),'w') as f:
+              json.dump({'apiVersion':'v1','kind':'List','items':docs},f)
+          PY
+      - name: Configure verified SSH credentials
+        env:
+          PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          test "$SSH_HOST" = '1.201.110.16'
+          test "$SSH_USER" = 'ubuntu'
+          test -n "$PRIVATE_KEY" && test -n "$KNOWN_HOSTS"
+          install -m 700 -d "$RUNNER_TEMP/ssh"
+          printf '%s\n' "$PRIVATE_KEY" > "$RUNNER_TEMP/ssh/key"
+          printf '%s\n' "$KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
+          chmod 600 "$RUNNER_TEMP/ssh/"*
+      - name: Deploy, monitor public health and optionally rehearse rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          opts=(-i "$RUNNER_TEMP/ssh/key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$RUNNER_TEMP/ssh/known_hosts" -o ConnectTimeout=15)
+          remote="$SSH_USER@$SSH_HOST"
+          prefix="/tmp/soc-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          monitor_pid=
+          cleanup() {
+            if [[ -n "$monitor_pid" ]]; then kill "$monitor_pid" 2>/dev/null || true; wait "$monitor_pid" 2>/dev/null || true; fi
+            ssh "${opts[@]}" "$remote" "rm -f '$prefix.sh' '$prefix.json'" || true
+          }
+          trap cleanup EXIT
+          curl --fail --silent --show-error --max-time 10 "$PUBLIC_URL"
+          scp "${opts[@]}" infra/scripts/deploy.sh "$remote:$prefix.sh"
+          scp "${opts[@]}" "$RUNNER_TEMP/api.json" "$remote:$prefix.json"
+          (
+            while true; do
+              code=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 8 "$PUBLIC_URL") || code=000
+              printf '%s %s\n' "$(date -u +%FT%TZ)" "$code" >> "$RUNNER_TEMP/public-health.log"
+              sleep 2
+            done
+          ) &
+          monitor_pid=$!
+          ssh "${opts[@]}" "$remote" "bash '$prefix.sh' deploy '$IMAGE' '$DIGEST' '$GITHUB_SHA' '$RUN_URL' '$prefix.json' '$DRILL'" | tee "$RUNNER_TEMP/deploy.log"
+          # The remote script already undoes failed rollouts; these are external checks after a successful rollout.
+          if ! python - <<'PY'
+          import json, os, urllib.request
+          with urllib.request.urlopen(os.environ['PUBLIC_URL'],timeout=10) as r:
+              assert r.status==200 and json.load(r)=={'status':'ok','backend':'real'}
+          lines=open(os.path.join(os.environ['RUNNER_TEMP'],'public-health.log')).readlines()
+          assert lines and all(line.split()[-1]=='200' for line in lines), 'Observed public health failures'
+          print('PUBLIC_HEALTH_PASSED',len(lines),'samples')
+          PY
+          then
+            previous=$(sed -n 's/^PREVIOUS_REVISION=//p' "$RUNNER_TEMP/deploy.log" | head -1)
+            ssh "${opts[@]}" "$remote" "bash '$prefix.sh' rollback '$previous' '$GITHUB_SHA'"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: deployment-evidence
+          path: |
+            ${{ runner.temp }}/deploy.log
+            ${{ runner.temp }}/public-health.log
+            ${{ runner.temp }}/api.json
+      - name: Remove runner SSH credentials
+        if: always()
+        run: rm -f "$RUNNER_TEMP/ssh/key" "$RUNNER_TEMP/ssh/known_hosts"

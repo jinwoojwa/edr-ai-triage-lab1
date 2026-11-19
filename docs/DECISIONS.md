@@ -171,6 +171,54 @@ rundll32.exe (pid 51765) ← ppid 37467
 
 생성기는 HTTP 헬스 엔드포인트가 없어 이번 단계에 프로브를 넣지 않고 Pod 상태·로그·이벤트 증가량으로 확인한다. 워커 하트비트는 경보 처리 중 갱신되지 않으므로 기본 60초 대신 `HEARTBEAT_STALE_SEC=180`을 사용한다. 300초 lease와 처리 시간을 함께 관찰하고, 실제 LLM으로 전환하기 전 프로브·종료 유예를 재검토한다. API의 liveness가 DB까지 검사하면 DB 장애 때 API 재시작만 반복하므로 의존성 검사는 readiness에 둔다.
 
+### 인프라 5단계 외부 공개 범위 (2026-11-18)
+
+첫 Ingress는 `soc.1.201.110.16.nip.io`의 HTTP `Exact /healthz`만 `soc/api:80`으로 전달한다. 외부에서 상태를 확인하는 데 필요한 최소 경로이며, 실제로 200과 `{"status":"ok","backend":"real"}`을 확인했다. `/approvals`, `/docs`, `/dify/retrieval`은 동일 호스트에서 404로 확인했다. 잘못된 Host와 `/healthz/extra`도 404다.
+
+전체 API를 공개하기 전에는 인증·권한 검증과 TLS를 적용하고 검증한다. 현재 승인 조회·처리 API에는 요청자 인증이 없으며, Dify 검색 경로에는 별도 Bearer 검사만 있고 점수 정규화가 미구현이다. 이번 단계에서 승인 또는 검색 경로를 외부로 열지 않는다. 서버 운영체제·UFW·가비아 보안 그룹은 변경하지 않았다. 🔍 기록 담당자와의 교차 검토는 미완료다.
+
+### 인프라 6단계 Job 정책 (2026-11-19)
+
+setup은 앱 이미지에서 멱등 초기화를 실행한다. OpenSearch HTTP health의 `timed_out=false`와 상태 yellow/green을 initContainer에서 확인하며 Job 전체 시간은 300초로 제한한다. setup 재실행도 완료했고 기존 리포트 내용·버전 보존을 확인했다.
+
+KB는 기존 `Dockerfile.kb`와 빌드 전용 `Dockerfile.kb.dockerignore`로 PDF를 포함한 CPU 전용 이미지로 분리한다. 기존 앱 이미지와 `.dockerignore`는 변경하지 않는다. 적재 명령은 대상 인덱스를 삭제·재생성하므로 후보 `kb-playbooks-d3-candidate-20261119`에서 실행한다. 자동 재시도는 0회, deadline 1800초, 로그 보존용 TTL은 86400초다. 실패 후 새 실행 여부는 원인 검토 뒤 결정한다.
+
+실임베딩 Job은 `FAKE_LLM=false`와 모델·1536차원을 명시한다. 서비스의 LLM·KB 전환 및 외부 docs 공개는 별도 작업이다. 기존 OpenSearch yellow의 원인은 top_queries 복제본이며 이번 작업에서 변경하지 않는다. 기록 담당자 교차 리뷰는 미완료다.
+
+#### 6단계 실행 결과와 품질 경계
+
+setup 2회가 모두 완료되고 기존 리포트가 보존됐다. 첫 KB dry-run은 120개 청크를 만들었지만 06번이 누락됐다. 사용자 추가 승인으로 `parse.py`의 빈 fast 결과에 OCR fallback을 추가했다. 이후 dry-run은 9종 121개 청크, 실제 임베딩 적재 Job은 28초에 완료했다. 후보에 1536차원 코사인 벡터 121개와 9종 출처를 확인했다. 최종 KB 이미지 태그는 `day3-stage6-20261119-ocr`다.
+
+프로젝트 평가 함수를 서버 검증 Job에서 실행한 Recall@3은 키워드 18/21(0.857), 벡터 16/21(0.762), 하이브리드 18/21(0.857)였다. 하이브리드는 기존 기록의 0.857과 같으며 개선으로 기록하지 않는다. 06번 OCR 한글 손상과 영어 문서 교차 언어 검색 실패가 남아 있다. 실패 문항 k10·k13·k14와 정책 검색 상위의 헤더·다른 조치 행을 후속 개선 근거로 남긴다. 이는 문서 단위 Recall이며 승인권자 답 정확도나 실제 LLM 판정 정확도가 아니다. 전체 에이전트 최종 평가표도 이번 검색 측정만으로 채우지 않는다.
+
+실제 LLM·KB 서비스 전환, 외부 docs 공개, Dify 연동은 별도다. Secret에 OpenAI 키를 추가한 것은 사용자 승인을 받았으며 OS·방화벽·보안 그룹은 변경하지 않았다. 인프라 6단계의 Job·적재·검색 검증은 완료했고 문서 품질 고도화와 기록 담당자 교차 리뷰는 남아 있다.
+
+### 실제 LLM·KB 서비스 활성화 (2026-11-19)
+
+API와 worker를 `FAKE_LLM=false`, `KB_TOOLS=real`로 전환하고 검증된 후보 `kb-playbooks-d3-candidate-20261119`를 연결했다. 실제 모델은 gpt-4o-mini(OpenAI 응답 모델명 gpt-4o-mini-2024-07-18), 쿼리 임베딩은 text-embedding-3-small 1536차원이다. 환경변수·실제 ChatOpenAI 객체·모델 응답 메타데이터·토큰·실제 도구 조회·저장된 보고서로 전환을 검증했다. 설정값만 보고 성공으로 판정하지 않았다.
+
+일회성 검증 Job은 악성·정상 2건에서 실제 모델을 각각 4번 호출했다. 악성은 malicious로 맞혔으나 정상 IT 자산 수집은 malicious로 오판했다. 두 결과 모두 G-1/G-2는 통과했다. 따라서 가드레일 통과와 판정 정확도는 다른 지표다. 소수 2건의 일치는 1/2이며 최종 에이전트 평가 12건을 대신하지 않는다. 기존 평가표를 이 결과로 덮어쓰지 않는다.
+
+실제 서비스 워커의 새 합성 경보 `llm-live-20261119-approve`는 suspicious로 판정되어 승인 대기에 저장됐다. 02번 자격증명 덤프 플레이북 등 실제 검색 근거와 event_id를 확인했다. API를 다시 시작한 뒤 승인·반려 HTTP 200과 완료 저장을 검증했다. 반려 경보는 같은 실제 권고를 다른 체크포인트에 복제한 것이며 별도 독립 LLM 판정으로 세지 않는다. 기존 mock 리포트는 재판정하거나 삭제하지 않았다.
+
+생성기·워커를 잠시 정지하고 new/in_progress=0에서 순차 전환한 뒤 둘 다 replica 1로 복원했다. 관측 처리 시간 12.47~16.9초에서 기존 heartbeat 180초·종료 유예 240초·프로브는 유지했다. 장기 지연·다양한 사례에 대한 충분성을 보증하지 않으므로 이후 실패율·latency를 계속 관찰한다. 모델 오판·OCR·교차 언어 검색은 고도화 대상으로 남긴다.
+
+이번 작업은 허용된 설정·검증 Job·문서 5개 파일만 변경했다. 서버 OS·방화벽·Secret은 변경하지 않았다. 다음 순서는 CI/CD 구축, 그 뒤 인증·HTTPS를 갖춘 외부 docs/API 공개다. 사람 승인 장치는 유지하며 교차 리뷰는 미완료다.
+
+### 인프라 7단계 CI/CD 설계와 검증 (2026-11-19)
+
+사용자 결정에 따라 Dify 플랫폼·점수 정규화·Dify 테스트는 제외한다. 나머지 기존 테스트를 격리된 OpenSearch 2.19.0·Postgres 16에서 실행한다. 로컬 검증은 **67 passed, 0 skipped (12.43초)**였다. Postgres 테스트용 DB 생성과 API 재시작 후 승인 재개까지 실제 실행했다. 모델 품질·실제 LLM 호출은 이 CI 결과로 평가하지 않는다.
+
+코드 push/PR은 test를 수행하고 trusted main만 게시·배포한다. 문서만 변경한 push는 제외한다. test 실패 또는 예상하지 않은 skip은 build·deploy를 막는다. 고정된 공식 Actions commit을 사용하며 GHCR에는 SHA 7자리 tag와 전체 commit label을 기록한다. 같은 tag가 있으면 전체 SHA를 검사하고 digest를 재사용한다. 다른 커밋의 동일 7자리 tag는 덮어쓰지 않는다. 단일 linux/amd64 manifest를 게시해 실제 Pod imageID와 digest를 직접 대조한다.
+
+API에만 maxUnavailable=0·maxSurge=1·revisionHistoryLimit=5·progressDeadlineSeconds=240을 명시한다. rollout은 300초 기다린다. 새 API Pod 한 개에 requests CPU 100m·메모리 256Mi의 여유가 필요하다. 워커·생성기·DB·PVC·Job·실제 LLM/KB 설정은 자동 갱신하지 않는다. API와 워커의 코드 버전이 달라질 수 있으므로 공통 프로토콜 변경은 별도 배포 범위로 잡는다.
+
+Environment `soc`의 승인 후 기존 SSH 경로로 배포하며, known_hosts 검증과 전용 키를 사용한다. 공개 6443 추가 개방은 필요 없다. 전용 SSH 공개 키의 authorized_keys 등록은 서버 설정 변경이므로 사용자 승인 후 수행한다. ubuntu 키는 sudo 권한이 있으므로 단순 restrict 옵션을 최소 권한 계정으로 표현하지 않는다. 비밀 값은 저장소·artifact에 남기지 않는다.
+
+이전 정상 revision을 기록하고 CI가 렌더링한 API 매니페스트만 dry-run·apply한다. 새 이미지의 Pod health/ready와 digest, 외부 health를 확인한다. 실패 시 원인 수정 전에 기록한 정상 revision으로 undo하며 복구 성공도 최초 실패를 성공으로 바꾸지 않는다. 자동 undo는 Kubernetes 자체 기능이 아니라 이번 스크립트의 동작이다. ConfigMap·Secret·DB는 undo 범위가 아니다.
+
+실제 Actions 게시·승인 배포·이미지 고장 및 복구 검증은 접속/게시 승인을 기다린다. 구현만으로 인프라 7단계 완료를 기록하지 않는다. 외부 공개는 `/healthz`만 유지한다. 옆 팀 검증과 기록 담당자 교차 리뷰는 미완료다.
+
 ### 평가: 기준점(2일차)과 최종(3일차)
 
 | 지표 | 기준점 (2일차, 2026-11-18) | 최종 | 바뀐 이유 |

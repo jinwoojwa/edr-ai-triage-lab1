@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 from collections import defaultdict
 from html import escape
@@ -32,6 +33,17 @@ def parse_pdf(path: str | Path, strategy: str | None = None) -> list:
         languages=["kor", "eng"],
         infer_table_structure=True,
     )
+    if strategy == "fast" and not any((element.text or "").strip() for element in elements):
+        logging.getLogger(__name__).warning(
+            "fast parsing returned no text; retrying with OCR: %s", Path(path).name
+        )
+        strategy = "ocr_only"
+        elements = partition(
+            filename=str(path),
+            strategy=strategy,
+            languages=["kor", "eng"],
+            infer_table_structure=True,
+        )
     pdf = Path(path)
     if strategy == "fast" and pdf.name.startswith(("01_", "09_")):
         return _restore_policy_tables(pdf, elements)

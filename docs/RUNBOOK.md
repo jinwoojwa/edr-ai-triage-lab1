@@ -182,6 +182,201 @@ API 매니페스트 적용 후 `deployment.apps/api 1/1`이었다. API는 기존
 
 **4단계 결과:** 실제 이벤트 기록 → 경보 생성 → 실제 텔레메트리 도구 조회 → 가짜 LLM 판정 → Postgres 체크포인트와 승인 대기까지 확인했다. 실제 LLM의 판정 품질과 실KB 검색, 사람의 최종 승인·조치 실행은 이번 검증 범위 밖이다. 4-3의 공동 진단 후 나눔은 남아 있다.
 
+## 서버 인프라 5단계: `/healthz` 전용 Ingress (2026-11-18)
+
+**사전 확인:** `Resolve-DnsName soc.1.201.110.16.nip.io -Type A`는 `1.201.110.16`을 반환했고, `Test-NetConnection 1.201.110.16 -Port 80 -InformationLevel Quiet`는 `True`였다. 적용 전 `http://1.201.110.16/healthz`는 404(`404 page not found`)였다. `IngressClass`는 `traefik (default)`이고 기존 Ingress는 없었다. `soc/api` Service는 80번 포트를 열고 EndpointSlice는 API Pod의 `10.42.0.27:8000`을 가리켰다. 내부 API의 `/healthz`는 `{"status":"ok","backend":"real"}`, `/readyz`는 `{"ready":true,"opensearch":true,"postgres":true}`였다.
+
+**적용 명령과 결과 (PowerShell):**
+
+```powershell
+$kubeconfig = 'C:\Users\Admin\.kube\edr-team.yaml'
+$manifest = 'D:\workspace\03-projects\edr-ai-triage-lab1\infra\k8s\50-ingress.yaml'
+kubectl --kubeconfig $kubeconfig apply --dry-run=server -f $manifest
+kubectl --kubeconfig $kubeconfig apply -f $manifest
+kubectl --kubeconfig $kubeconfig -n soc get ingress api-health -o wide
+kubectl --kubeconfig $kubeconfig -n soc describe ingress api-health
+Invoke-WebRequest 'http://soc.1.201.110.16.nip.io/healthz' -UseBasicParsing
+```
+
+서버 dry-run은 `ingress.networking.k8s.io/api-health created (server dry run)`, 실제 적용은 `ingress.networking.k8s.io/api-health created`였다. Ingress는 `CLASS=traefik`, `HOSTS=soc.1.201.110.16.nip.io`, `PORTS=80`으로 표시됐고, `describe`의 `/healthz` 백엔드는 `api:80 (10.42.0.27:8000)`, 이벤트는 없었다. `ADDRESS=192.168.0.173`은 서버의 내부 주소이며, 외부 호스트의 실제 응답으로 공인 IP 경로를 검증했다. 로컬 `kubectl diff -f $manifest`는 Windows PATH에 `diff` 실행 파일이 없어 실패했다. 이후 서버 dry-run과 실제 응답으로 검증했다.
+
+**외부 검증:** `http://soc.1.201.110.16.nip.io/healthz`는 HTTP 200과 `{"status":"ok","backend":"real"}`을 반환했다. 공인 IP에 `Host: soc.1.201.110.16.nip.io` 헤더를 넣어도 200이었다. 잘못된 `Host: wrong.example`은 404(`404 page not found`)였다. 같은 공개 호스트에서 `/healthz/extra`, `/approvals`, `/docs`, `/dify/retrieval`은 모두 404였다. 따라서 `Exact /healthz`만 라우팅됐다. 배포 전후 기존 API·generator·worker·OpenSearch·Postgres Pod는 모두 `1/1 Running`이었고 PVC 두 개는 `Bound`였다.
+
+**장애 진단과 복구:** 요청 Host를 잘못 지정해 404를 재현했다. DNS A 레코드, TCP 80, Ingress의 `HOSTS`·`PATHS`, Service의 포트·EndpointSlice 순서로 확인한 뒤 올바른 Host로 요청하니 200으로 복구됐다. Ingress를 수정하거나 서버 운영체제·UFW·가비아 보안 그룹을 변경하지 않았다. 🔍 기록 담당자가 부재 중이므로 장애 공동 진단과 교차 검토는 미완료다.
+
+## 인프라 6단계: setup·KB 적재 Job (2026-11-19)
+
+서버의 기존 API·워커·생성기·OpenSearch·Postgres는 모두 재시작 0회로 실행 중이었다. 노트북 Docker 엔진이 꺼져 있어 기존 Docker Desktop을 시작했다. OS·UFW·가비아 보안 그룹·k3s 전역 설정은 변경하지 않았다. 사용자 승인을 받고 로컬 `.env`의 OpenAI 키를 값 노출 없이 기존 `soc-app-secrets`의 `OPENAI_API_KEY`에 추가했다.
+
+`60-setup-job.yaml`, `61-kb-ingest-job.yaml`은 서버 dry-run에서 모두 `created (server dry run)`이었다. setup은 `python -m soc.setup`으로 실행했고, `setup`과 별도 이름 `setup-repeat-20261119` 모두 `Complete`였다. 두 로그는 `인덱스 준비 완료: edr-events-* 템플릿, 알림, 리포트`였다. 기존 리포트 `al-f75e6b7d790d`의 내용·버전이 전후 동일했으며 템플릿 `edr-events`가 존재했다. 서비스가 계속 새 경보를 만들기 때문에 전체 건수 동일 여부는 멱등성 기준으로 사용하지 않았다.
+
+배포 전 서버에는 `kb-*` 인덱스·별칭이 없었다. OpenSearch `yellow`는 `top_queries-2026.11.19-89290`의 복제본 1개 미할당 때문이며 모든 기본 샤드는 `STARTED`였다. 기존 인덱스 설정은 변경하지 않았다. KB 적재는 별도 후보 `kb-playbooks-d3-candidate-20261119`에 수행하며 API·워커의 mock 설정과 연결하지 않는다.
+
+### 6단계 실행 명령 (프로젝트 루트 PowerShell)
+
+```powershell
+$kc = 'C:\Users\Admin\.kube\edr-team.yaml'
+docker build -f Dockerfile.kb -t ghcr.io/leedongwon9812/edr-ai-triage-lab1-kb:day3-stage6-20261119-ocr .
+docker push ghcr.io/leedongwon9812/edr-ai-triage-lab1-kb:day3-stage6-20261119-ocr
+kubectl --kubeconfig $kc apply --dry-run=server -f infra/k8s/60-setup-job.yaml -f infra/k8s/61-kb-ingest-job.yaml
+kubectl --kubeconfig $kc apply -f infra/k8s/60-setup-job.yaml
+kubectl --kubeconfig $kc -n soc wait --for=condition=complete job/setup --timeout=300s
+kubectl --kubeconfig $kc -n soc logs job/setup
+
+# 아래 생성 명령은 새 이름일 때만 사용. 이미 실행한 Job은 먼저 상태·로그를 확인한다.
+$dry = kubectl --kubeconfig $kc create --dry-run=client -f infra/k8s/61-kb-ingest-job.yaml -o json | ConvertFrom-Json
+$dry.metadata.name = 'kb-ingest-dryrun-ocr-20261119'
+$dry.spec.template.spec.containers[0].command = @('python','-m','soc.kb.ingest','--dry-run','--show','3')
+$dry | ConvertTo-Json -Depth 40 | kubectl --kubeconfig $kc create -f -
+kubectl --kubeconfig $kc -n soc logs job/kb-ingest-dryrun-ocr-20261119
+# 9종 청크 결과 검토 후 본 적재 실행
+kubectl --kubeconfig $kc apply -f infra/k8s/61-kb-ingest-job.yaml
+kubectl --kubeconfig $kc -n soc wait --for=condition=complete job/kb-ingest --timeout=1800s
+kubectl --kubeconfig $kc -n soc logs job/kb-ingest
+```
+
+KB 이미지의 로컬 크기는 4,163,089,047바이트였다. GHCR 게시 digest는 `sha256:27bc9c4b78c7a47263db8a8c7d1aa6bd5bc4a5e79501910bd0a1057e707a6cec`다. 이미지에서 PDF 9개, Unstructured import, OCR 언어 `eng/kor/osd`, `/app/.env` 미포함을 확인했다. 최초 서버 pull에는 수 분이 걸릴 수 있으며 로그 조회가 `PodInitializing`이면 Pod 이벤트에서 `Pulling`인지 먼저 확인한다.
+
+### 6단계 검증 결과와 발견한 문제
+
+첫 dry-run `kb-ingest-dryrun-20261119`는 Job 자체는 92초에 완료됐지만 06번 스캔 PDF가 요소·청크 0개여서 내용 검증은 실패했다. 사용자가 `src/soc/kb/parse.py` 추가 수정을 승인했다. fast 결과에 텍스트가 전혀 없을 때만 `ocr_only`로 재시도하도록 수정했고, 정상 fast 결과 유지와 빈 결과 OCR 재시도를 이미지 안의 mock 검사로 확인했다. 01·09번의 fast 표 복원 경로는 유지됐다. 수정 이미지는 `day3-stage6-20261119-ocr`, digest `sha256:0080aa507e2049fc682ea896591b526ff52c3ed02f1aabe1cfcb38a3b93f7beb`이며 매니페스트도 이 태그를 사용한다.
+
+| 검증 | 실제 결과 |
+| --- | --- |
+| setup / setup-repeat-20261119 | 각각 6초, Complete 1/1; 기존 리포트 내용·버전 동일 |
+| 수정 후 dry-run | `kb-ingest-dryrun-ocr-20261119`, 30초, Complete 1/1; 9종 121개 청크 |
+| 본 적재 | `kb-ingest`, 28초, Complete 1/1; 실제 `text-embedding-3-small` 벡터 121건 저장 |
+| 검색 검증 | `kb-verify-20261119`, 14초, Complete 1/1; 9종 출처·1536차원·cosinesimil 매핑 확인 |
+| Recall@3 (21문항) | 키워드 18/21=0.857, 벡터 16/21=0.762, 하이브리드 18/21=0.857 |
+
+출처별 저장 건수: 01번 14, 02번 2, 03번 3, 04번 2, 05번 2, 06번 1, 07번 2, 08번 3, 09번 92개. `_refresh` 후 실제 count 121개를 확인했다. 후보 인덱스는 복제본 0개, 원본 데이터 크기는 측정 당시 3,300,652바이트였다.
+
+검색 검증 Job은 본 적재 매니페스트의 이미지·환경변수를 재사용하고, 프로젝트의 `search_playbook`, `rag_eval.load_questions`, `rag_eval.evaluate`를 직접 호출했다. `rag_eval`의 기본 QUESTIONS 경로는 이미지에서 `/app/src/data/kb/...`로 해석되므로 검증 시 `load_questions(Path('/app/data/kb/eval_questions.jsonl'))`로 실제 경로를 명시했다. 평가 코드 파일은 수정하지 않았다. `search_playbook('격리는 누가 승인해?', 3)`은 실제 01번 정책 PDF 1쪽의 청크를 반환했지만, 상위 결과에 헤더·다른 조치 행도 포함됐다. 이 결과만으로 격리 승인권자 답이 정확하다고 판정하지 않는다.
+
+**남은 품질 문제:** OCR로 06번이 저장되었지만 한글이 일부 깨져 원문의 완전한 복원으로 볼 수 없다. 하이브리드 실패 문항은 `k10`(06번 스캔본), `k13`·`k14`(08번 영어 문서)다. 청크 수와 Job Complete는 검색 품질의 대체 지표가 아니다. 파싱·검색 고도화와 최종 답 정확도 평가는 후속 작업이다. PDF FontBBox 경고는 있었지만 Job 종료 오류는 없었다.
+
+**배포 후 상태:** 10:47 KST 기준 기존 5개 서비스 Pod는 모두 1/1 Running·재시작 0회, 두 PVC는 Bound, API `/readyz`의 OpenSearch·Postgres는 모두 true였다. 공인 `/healthz`는 HTTP 200과 `backend=real`이었다. API·워커 설정은 `FAKE_LLM=true`, `KB_TOOLS=mock`으로 유지되며, 이번 결과는 실제 임베딩 적재·검색 검증이다. 에이전트의 실LLM/실KB 전환과 외부 docs 공개는 수행하지 않았다.
+
+Job은 완료 후 86400초에 자동 정리된다. `kubectl -n soc get jobs`, `kubectl -n soc logs job/kb-ingest`, `kubectl -n soc logs job/kb-verify-20261119`로 TTL 전 결과를 확인한다. Job 삭제 후에도 OpenSearch 후보 인덱스는 남는다. 재적재할 때는 새 Job 이름·새 후보 인덱스를 사용한다. 기록 담당자 교차 리뷰는 미완료다.
+
+## 실제 LLM·KB 활성화 (2026-11-19)
+
+허용된 변경은 `31-config.yaml`, `62-llm-verify-job.yaml`, RUNBOOK·DECISIONS·CAPACITY의 5개 파일이다. 기존 앱 이미지 `day2-stage1-8aab319`를 재사용했다. 이미지의 LLM·노드·가드레일·그래프·체크포인트·검색 모듈은 로컬과 일치했다. telemetry/tools는 로컬과 차이가 있었지만 배포 이미지에 실제 조사 도구 4개가 등록되어 있고 이번 프로세스 트리·활동 검증이 통과했다. 현재 로컬의 최신 네트워크 도구 기능 전체를 검증한 결과는 아니다.
+
+### 사전 실제 모델 검증
+
+`62-llm-verify-job.yaml`을 서버 dry-run 후 적용했다. `llm-verify-20261119`는 38초에 Complete 1/1이었다. 자동 재시도 0, deadline 900초, TTL 86400초다. 앱 이미지와 기존 Secret을 사용하고 목표 설정은 Job 환경변수로 override했다. 운영 설정을 바꾸기 전에 `ChatOpenAI`, 실제 모델 응답 `gpt-4o-mini-2024-07-18`, `chatcmpl-...` 식별자·토큰·실제 event_id·KB 청크를 확인했다.
+
+테스트는 프로젝트의 시뮬레이터·RuleEngine으로 만든 악성/정상 각 1개 사례를 실제 OpenSearch에 저장해 사용했다. `llm-verify-events-20261119-*`, `llm-verify-alerts-20261119`, `llm-verify-reports-20261119`와 고유 Postgres thread_id를 사용했다. 테스트 전용 템플릿은 별도 이름으로 만들었고 운영 `edr-events` 템플릿은 덮어쓰지 않았다. KB 후보는 읽기만 했다.
+
+| 사례 | ID | 실제 판정 | 시간 | 입력/출력 토큰 | LLM 호출 |
+| --- | --- | --- | --- | --- | --- |
+| 자격증명 덤프 (정답 악성) | `llm-verify-f4c183d7-0` | malicious, 신뢰도 0.9, 승인 대기 | 15.41초 | 6188 / 880 | 4 |
+| IT 자산 수집 (정답 정상) | `llm-verify-f4c183d7-1` | malicious, 신뢰도 0.9, 승인 대기 — 오판 | 12.47초 | 6421 / 927 | 4 |
+
+두 사례 모두 실제 도구로 조회한 기록 안에서 근거 ID를 사용했고 G-1/G-2 검사는 통과했다. 악성 사례의 근거는 `llm-f4c183d7-0-00000002`, `...00000003`이었다. 검색된 02번 플레이북 1쪽의 격리·비밀번호 초기화 정책과 권고 승인권자를 대조했다. 같은 실제 악성 권고를 별도 테스트 thread로 복제해 새 Python 프로세스에서 승인과 반려를 각각 재개했고 모두 completed였다. 이는 추가 독립 LLM 판정 2건이 아니다. 정상 사례의 오판은 숨기지 않고 아래 품질 한계로 기록했다.
+
+### 서비스 전환과 API 재시작 후 승인 검증
+
+전환 전 서비스는 API·worker·generator 각각 1개였다. API 기존 Pod에는 Secret 추가 전 환경이 남아 OpenAI 키가 없었지만 Secret에는 키가 있었다. Secret 변경 없이 새 Pod에서 키를 읽도록 재시작했다.
+
+```powershell
+$kc = 'C:\Users\Admin\.kube\edr-team.yaml'
+kubectl --kubeconfig $kc apply --dry-run=server -f infra/k8s/62-llm-verify-job.yaml
+kubectl --kubeconfig $kc apply -f infra/k8s/62-llm-verify-job.yaml
+kubectl --kubeconfig $kc -n soc logs job/llm-verify-20261119
+# Job 결과 검토 후 전환. 실행된 Job을 반복 apply해도 다시 실행되지는 않음.
+kubectl --kubeconfig $kc -n soc scale deployment/generator --replicas=0
+kubectl --kubeconfig $kc -n soc scale deployment/worker --replicas=0
+kubectl --kubeconfig $kc -n soc wait --for=delete pod -l app=worker --timeout=50s
+kubectl --kubeconfig $kc apply --dry-run=server -f infra/k8s/31-config.yaml
+kubectl --kubeconfig $kc apply -f infra/k8s/31-config.yaml
+kubectl --kubeconfig $kc -n soc rollout restart deployment/api deployment/worker
+kubectl --kubeconfig $kc -n soc rollout status deployment/api --timeout=300s
+# API 설정·readyz와 new 건수 확인 후
+kubectl --kubeconfig $kc -n soc scale deployment/worker --replicas=1
+kubectl --kubeconfig $kc -n soc rollout status deployment/worker --timeout=300s
+# 단일 테스트 경보·승인 재개 검증 후
+kubectl --kubeconfig $kc -n soc scale deployment/generator --replicas=1
+kubectl --kubeconfig $kc -n soc rollout status deployment/generator --timeout=300s
+```
+
+worker 정지 후 new=0·in_progress=0을 확인하고 전환했다. 목표 설정은 `FAKE_LLM=false`, `KB_TOOLS=real`, `INDEX_KB=kb-playbooks-d3-candidate-20261119`, `EMBED_MODEL=text-embedding-3-small`, `EMBED_DIM=1536`이며 기존 real backend·telemetry·Postgres 설정은 유지했다. API·worker 각각 새 프로세스에서 설정·모델 객체를 확인했다.
+
+운영 워커 검증용 합성 이벤트 3개를 실제 `edr-events-*`에 넣고 테스트 경보 `llm-live-20261119-approve`를 new로 만들었다. worker `worker-56b6f5b45b-kpkwl`이 선점해 16.9초에 pending_approval로 전환했다. 실제 OpenAI chat/embedding HTTP 200과 후보 KB 검색을 로그에서 확인했다. 판정은 suspicious(0.8), 근거 `llm-live-20261119-00000002`·`...00000003`, 출처는 02·08·09번 PDF였다. 같은 악성 유형도 사전 검증의 malicious와 달리 판정해 품질 변동성을 보였다.
+
+해당 실제 권고를 `llm-live-20261119-reject`의 별도 체크포인트로 복제해 반려 검증용으로 준비했다. API를 다시 rollout restart한 뒤 실제 HTTP `POST /approvals/{id}`를 내부 API에 전송했다. approve·reject 각각 HTTP 200, approval.decision은 approved·rejected, 두 경보 모두 completed였다. 리포트 trace는 `조사 → 도구 → 조사 → 판정 → 가드레일 → 권고 → 승인 → 리포트`, sources 3개, 토큰 6302/952, 추정 비용 0.001517 USD였다. 복제된 반려 리포트의 동일 토큰·비용은 추가 LLM 호출 비용이 아니다. 실제 단말 격리나 비밀번호 변경을 실행하는 코드는 없다.
+
+### 결과 확인과 품질 한계
+
+11:10 KST 기준 API·worker·generator는 각각 1/1, 기존 OpenSearch·Postgres와 함께 Pod 재시작 0회, PVC 2개 Bound였다. API readyz는 모두 true, worker heartbeat 1초, busy=0·failed=0이었다. 상태 건수는 new=0·in_progress=0·pending_approval=1377·completed=297·failed=0이었다. 중지 직전 pending_approval 1377·completed 295에서 테스트 승인/반려 2건이 completed에 추가됐다. 기존 `al-f75e6b7d790d`는 승인 대기로 보존됐다. 생성기가 계속 실행하므로 건수는 이후 증가한다.
+
+API 재시작으로 끊긴 로컬 port-forward를 `127.0.0.1:18002 → api:80`으로 다시 연결했다. `http://localhost:18002/docs`는 200이며 `/reports/llm-live-20261119-approve`에서 실제 권고·출처·승인 결과를 조회했다. 필요하면 다음 명령을 다시 실행한다.
+
+```powershell
+kubectl --kubeconfig 'C:\Users\Admin\.kube\edr-team.yaml' -n soc port-forward svc/api 18002:80 --address=127.0.0.1
+```
+
+연결·실제 판정·검색·승인 재개 검증은 완료했지만 사전 라벨 2건 중 정답 일치는 1/2다. 정상 IT 활동을 악성으로 분류했고 스캔본 OCR 손상과 검색 상위의 다른 정책 행도 영향을 줄 수 있다. 가드레일은 실제 근거 존재·개수를 검사하며 정상/악성 의미 판단의 정확성을 보증하지 않는다. 사람 승인은 유지하고, 이 결과를 전체 정확도나 운영 품질 합격으로 기록하지 않는다.
+
+OS·UFW·가비아 보안 그룹·Secret·앱 이미지·기존 프로브는 변경하지 않았다. CI/CD·Dify·외부 docs 공개는 후속 작업이다. 공인 `/healthz`는 계속 HTTP 200이며 실제 업무 API는 외부에 열지 않았다. 교차 리뷰는 미완료다.
+
+복구가 필요하면 generator·worker의 신규 처리 시작을 제어하고 ConfigMap을 이전 `FAKE_LLM=true`, `KB_TOOLS=mock`으로 복원하며 이번 추가 키(INDEX_KB·EMBED_MODEL·EMBED_DIM)는 이전 상태와 대조해 복구한다. API·worker 재시작 후 설정·readiness·replica를 재확인한다. 이미지 rollout undo만으로 ConfigMap이 복구되지는 않는다. 테스트 인덱스·리포트·체크포인트는 검증 근거로 보존했으며 Job TTL은 86400초다.
+
+생성기 복원 후 자연 생성된 경보 `al-170635837113`·`al-9397d8e1a798`도 실제 워커가 각각 13.5초·11.6초에 승인 대기로 처리했다. 마지막 관측에서 워커 메트릭은 processed=1·pending_approval=3·failed=0이었고 다음 경보를 처리 중이었다. 이는 초기 테스트 표의 비용 합계에 포함하지 않았다.
+
+## 인프라 7단계 — CI → GHCR → API 배포 → 롤백 (2026-11-19)
+
+### 변경 범위와 현재 진행 상태
+
+허용된 `.github/workflows/ci.yml`, `infra/scripts/deploy.sh`, `infra/k8s/11-api.yaml`, 이 문서, `docs/DECISIONS.md`, `docs/DEPLOYMENT.md`의 6개 파일만 변경한다. Dify 제외, API만 자동 배포한다. 기존 LLM·KB·worker·generator·Secret·ConfigMap·PVC·Ingress 범위는 유지한다. 서버 키 등록과 Git 게시 승인은 별도로 확인한다.
+
+### 로컬 CI 게이트 실행 결과
+
+운영과 분리된 Docker 컨테이너 `stage7-ci-opensearch`(2.19.0, 127.0.0.1:19270), `stage7-ci-postgres`(16, 127.0.0.1:15470)를 사용했다. 일회용 DB 생성 권한을 가진 CI 전용 계정이며 실제 모델 키는 주입하지 않았다.
+
+```powershell
+$env:OPENSEARCH_URL='http://127.0.0.1:19270'
+$env:POSTGRES_DSN='postgresql://soc:ci-only-password@127.0.0.1:15470/soc'
+.\.venv\Scripts\python.exe -m pytest -q --ignore=tests/test_dify.py --junitxml=<프로젝트-밖-임시폴더>/stage7-test-results.xml
+# 67 passed in 12.43s, 0 skipped
+```
+
+DB 미연결 상태의 최초 실행은 63 passed·4 skipped였다. 이 결과는 CI 완료 근거로 쓰지 않고 격리 DB를 준비해 67개 전부 재검증했다. workflow는 사전 연결과 JUnit skip·필수 재개 테스트 누락을 검사한다. test 실패면 needs에 의해 build·deploy가 시작되지 않는다. CI 사용자는 Postgres 일회용 DB를 만들 수 있어야 한다.
+
+### 최초 실행 준비 및 승인 경계
+
+1. 현재 `dongwon`과 원격 main의 관계를 확인한다. 확인 시 로컬 HEAD `f3f9aca`는 main `edd19cf`보다 32커밋 앞서고 뒤처진 커밋은 0개였다. 기존 작업까지 main에 공개하게 되므로 Git 게시 전에 범위를 확인한다. 기존 미추적 계획서와 Dify 문서는 커밋 대상에서 제외한다.
+2. 승인 후 전용 CI SSH 키를 서버에 등록하고 GitHub Environment `soc`에 SSH_HOST·SSH_USER·SSH_PRIVATE_KEY·SSH_KNOWN_HOSTS를 등록한다. Environment reviewer 승인 단계를 둔다. 기존 개인 키나 클러스터 kubeconfig를 임의 업로드하지 않는다.
+3. 허용된 파일을 검증·커밋한 뒤 승인된 main에 push한다. GitHub Actions test → build → 배포 승인 → deploy 순서로 진행한다. main에서 수동 실행할 때 `rollback_drill=true`를 선택하면 이미지 고장·복구 실습을 포함한다.
+4. 실행 URL·테스트 수·SHA·digest·revision·복구 초·public-health 표본을 실제 로그에서 아래 기록란에 추가한다. 아직 실행하지 않은 결과를 성공으로 기록하지 않는다.
+
+### 배포·실패 진단·복구
+
+스크립트는 서버의 `sudo -n k3s kubectl`·python3·flock을 사용한다. API Deployment·Service만 렌더링해 전달하며 임시 파일에는 Secret이 없다. GitHub concurrency와 `/tmp/soc-api-deploy.lock`으로 동시 배포를 방지한다. known_hosts가 불일치하면 지문부터 확인하며 검증을 끄지 않는다.
+
+새 이미지가 실패하면 기존 Ready Pod를 유지하고 이전 revision으로 undo한다. `rollback_drill=true`는 존재하지 않는 이미지의 rollout 45초 실패·기존 Ready 이미지 확인·정상 revision 복구를 수행한다. 외부 `/healthz`를 약 2초마다 표본 관측해 deployment-evidence artifact로 남긴다. 외부 smoke 실패는 별도 rollback 호출로 복구하며 실행 결과는 실패로 남긴다.
+
+```bash
+sudo k3s kubectl -n soc rollout history deployment/api
+sudo k3s kubectl -n soc get deployment api -o jsonpath='{.spec.template.spec.containers[0].image}'
+sudo k3s kubectl -n soc get pods -l app=api -o wide
+sudo k3s kubectl -n soc describe pod <실패한-Pod>
+# 로그의 PREVIOUS_REVISION으로 되돌림. 예시의 자리표시자는 실제 숫자로 대체
+sudo k3s kubectl -n soc rollout undo deployment/api --to-revision=<정상-revision>
+sudo k3s kubectl -n soc rollout status deployment/api --timeout=300s
+```
+
+Pod template annotation `soc.lab/commit`·OCI revision label은 전체 SHA, 이미지 tag는 7자리다. Pod imageID가 게시 digest와 같아야 새 코드 검증으로 인정한다. 외부 health 200만으로는 새 Pod 배포 성공을 판정하지 않는다. 승인 체크포인트·기존 리포트·PVC도 배포 전후 확인한다. port-forward는 Pod 교체로 끊길 수 있으므로 필요하면 `18002:80`을 다시 실행한다.
+
+### 실제 원격 실행 기록
+
+사용자가 전용 SSH 키 등록과 dongwon·main 게시(기존 32커밋 포함)를 승인했다. CI 전용 ed25519 공개 키만 ubuntu authorized_keys에 restrict 옵션으로 추가했고, 전용 키의 SSH·sudo k3s 조회를 확인했다. 기존 개인 키는 업로드하지 않았다. GitHub Environment soc에 main branch 제한·required reviewer와 네 SSH Secrets를 등록했다. OS·UFW·가비아 보안 그룹·기존 클러스터 Secret은 변경하지 않았다.
+
+현재 상태: 로컬 테스트 67개 통과, JUnit 필수 통합 테스트·skip 0 확인, actionlint 1.7.12·bash -n·ShellCheck warning 이상 검사·embedded Python 구문·git diff --check 모두 통과했다. 서버 read-only 사전 점검에서 python3·flock·sudo k3s kubectl 사용 가능, API 1/1, PVC 20Gi·10Gi Bound였다. 원격 게시·배포·고장 복구는 승인 및 실제 실행 대기다. workflow URL·신규 SHA/digest·revision·복구 시간은 아직 없다. 교차 진단 나눔과 옆 팀 검증도 미완료다.
+
+`11-api.yaml`의 소스 기본 이미지는 현재 실행 중인 유효한 수동 태그를 유지한다. CI가 이 파일을 읽고 테스트한 새 SHA tag@digest로 렌더링한 결과만 적용한다. 아직 게시되지 않은 SHA를 기본값으로 적어 수동 apply 시 pull 오류가 생기게 하지 않는다. 이후에도 CI 적용 결과를 이 기본 파일로 덮어쓰지 않는다.
+
 ## 공통 1차 확인
 ```bash
 kubectl -n soc get pods,svc,ingress,pvc,jobs
