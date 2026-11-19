@@ -95,7 +95,7 @@ curl.exe -fsS http://localhost:18002/readyz
 curl.exe -fsS http://soc.1.201.110.16.nip.io/healthz
 ```
 
-기대 응답은 `{"status":"ok","backend":"real"}`다. 기존 HTTP Exact `/healthz`는 CI 검증을 위해 유지한다. HTTPS docs·업무 API 공개 설정은 아래와 같으며 실제 발급·적용 결과는 RUNBOOK의 ‘외부 docs/API 공개’를 확인한다.
+기대 응답은 `{"status":"ok","backend":"real"}`다. 기존 HTTP Exact `/healthz`는 CI 검증을 위해 유지하고 docs·업무 API는 아래 HTTPS 주소로 공개했다. 실제 발급·적용 결과는 RUNBOOK의 ‘외부 docs/API 공개’에 기록했다.
 
 ```powershell
 curl.exe -fsS https://soc.1.201.110.16.nip.io/healthz
@@ -162,4 +162,7 @@ image pull 오류는 실패 Pod describe Events, readiness 실패는 readyz와 D
 | 실패 감지 | 최초 외부 502 1회 감지 → 실행 failure·기존 정상 revision 자동 복구 | 종료 대기 설정을 보강함 |
 | 보강 후 롤백 | [44461056039](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44461056039) success, 동일 SHA 재사용·고장 이미지 실패·48초 복구·최종 revision 15, 외부 23/23 HTTP 200 | 표본 관측이며 절대 무중단 보장 아님 |
 | 데이터 보존 | KB 121개·PVC 2개·기존 리포트·승인 대기 체크포인트 확인, 로컬 docs HTTP 200 | 상세 건수·로그는 RUNBOOK |
+| HTTPS 외부 공개 | [5453787 배포](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44467318306) success·90 tests·API revision 17, Certificate Ready·정상 CA/SAN 검증 | cert-manager 지원표 밖 k3s 1.37 실습 검증이며 장기 호환 보증 아님 |
+| 비용 기준 인증 | 무료 docs·조회·승인/반려 성공, 무키·틀린 키 triage 401, 인증된 실제 모델 1건 200·22.2초 | 트리아지는 Authorize 필요, 전용 키는 위 복사 절차 사용 |
+| 인증서 갱신 | 만료 2027-02-17·갱신 예약 2027-02-02 UTC | 예약·Ready 확인이며 미래 갱신 실행을 선검증한 것은 아님 |
 | 옆 팀 검증 | 미완료, 검증 팀 미지정 | 옆 팀이 가이드대로 실행하고 질문·해결 기록 |

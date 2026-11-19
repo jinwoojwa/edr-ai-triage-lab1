@@ -233,7 +233,13 @@ Environment `soc`의 승인 후 기존 SSH 경로로 배포하며, known_hosts �
 
 HTTPS는 Traefik·cert-manager로 제공하고 HTTP health는 기존 CI 때문에 200을 유지한다. docs·업무 HTTP만 HTTPS로 이동한다. Dify·readyz는 외부 경로에서 제외한다. 전역 / Prefix와 전역 로그인은 사용하지 않는다. cert-manager v1.21.3의 지원표는 1.36까지인데 현재 k3s는 1.37이므로 호환 확인 후 복구하는 조건의 설치 승인을 받았다. 실제 발급 결과·URL 확인은 RUNBOOK에 기록하며 공식 지원 여부와 구분한다.
 
-전용 Secret 추가·ACME/TLS Secret 생성은 승인받았다. OpenAI/DB Secret 값·OS·UFW·공유 보안 그룹은 유지한다. 키는 화면·Git에 출력하지 않는다. 공유 키에는 사용자별 신원·비용 상한·반복 호출 통제가 없고, 공개 승인자 이름도 신원 검증된 값이 아니다. 이 범위는 실습용 사용자 결정이며 별도 고도화와 구분한다. 실제 공개·유료 smoke 검증은 아직 진행 중이다.
+전용 Secret 추가·ACME/TLS Secret 생성은 승인받았다. OpenAI/DB Secret 값·OS·UFW·공유 보안 그룹은 유지한다. 키는 화면·Git에 출력하지 않는다. 공유 키에는 사용자별 신원·비용 상한·반복 호출 통제가 없고, 공개 승인자 이름도 신원 검증된 값이 아니다. 이 범위는 실습용 사용자 결정이며 별도 고도화와 구분한다.
+
+최종 [Actions 44467318306](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44467318306)은 90개 테스트·빌드·배포 모두 success, 코드 SHA 5453787·API revision 17이다. 게시 digest와 실제 이미지가 일치하며 HTTP health 표본 13개가 모두 200이었다. Certificate Ready·Order valid, Let's Encrypt SAN/신뢰 검증을 통과했다. 인증서 만료는 2027-02-17, 갱신 예약은 2027-02-02 UTC다. 이번 실습 발급 성공을 공식 호환성 보증이나 미래 갱신 성공으로 확대하지 않는다.
+
+외부 HTTPS docs·schema·조회 200, 무키/틀린 키 triage 401, Dify·readyz 404, docs HTTP→HTTPS 301을 확인했다. 브라우저 Swagger에서도 무인증 stats Execute가 200이었다. 인증 트리아지 1건은 22.2초·malicious·승인 대기였고 실제 chat 4회·embedding 1회를 호출했다. chat 토큰 14251/964·추정 0.002716 USD이며 전체 청구액은 아니다. 추가 유료 호출 없는 최종 승인으로 usage 동일을 확인했고 별도 복제 승인/반려도 무키 200·재호출 409였다. 이는 접속·인증 검증이며 최종 정확도 평가가 아니다.
+
+테스트 경보·리포트·체크포인트만 정리했고 원래 승인 대기·KB 121개·기존 PVC UID/PV·Secret 값은 보존했다. 외부 접속 목표는 완료했다. 변경 파일은 기본 10개와 승인된 Postgres 테스트 1개다. Ingress/TLS는 CI와 별도로 적용했으며 workflow·API Deployment·방화벽 파일은 추가 수정하지 않았다. 교차 리뷰는 미완료다.
 
 ### 평가: 기준점(2일차)과 최종(3일차)
 

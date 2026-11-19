@@ -448,9 +448,53 @@ TRIAGE_API_KEY는 무작위 전용 키를 메모리에서 생성하고 SSH stdin
 
 공식 release manifest v1.21.3의 SHA-256 `c04a51295adda2b1a775146751f973e787190778c7f35180861d9678876e5c74`를 GitHub asset digest와 대조해 설치했다. controller·cainjector·webhook Pod 기동과 webhook rollout을 확인했다. 51-tls.yaml은 server dry-run을 통과한 뒤 Issuer letsencrypt-soc·Certificate soc-public·Middleware public-https-redirect를 생성했다. ACME 이메일은 선택 항목이며 미지정이다. 신뢰된 인증서가 준비되기 전 업무 경로는 열지 않는다.
 
-### 배포·검증 진행 상태
+### 배포·인증서·외부 검증: 완료
 
-현재는 인증 API·테스트·Ingress/TLS 매니페스트 구현 및 로컬 테스트가 통과했고 Secret/인증서 준비를 진행 중이다. 새 API의 Actions SHA·digest·인증서 발급·외부 HTTP/HTTPS·Swagger·유료 smoke 결과는 실제 실행 후 아래에 기록한다. 완료를 미리 선언하지 않는다. 기존 HTTP health는 유지하며 OS·방화벽·공유 보안 그룹은 변경하지 않았다.
+인증 이미지부터 CI로 배포하고 내부에서 무키/잘못된 키 401·정상 키로 미존재 ID 404·operation별 schema를 확인한 뒤 50-ingress.yaml을 적용했다. 인증 없는 이전 API를 업무 경로로 공개하지 않았다. 외부 브라우저 Swagger에서 무인증 `/stats` → Try it out → Execute로 실제 200을 확인했다. 호출할 수 없는 내부 readyz를 공개 schema에서도 숨긴 보강까지 최종 이미지로 다시 배포했다.
+
+| 항목 | 실제 결과 |
+| --- | --- |
+| 초기 인증 배포 | [44466767080](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44466767080), SHA 7e355d4, test/build/deploy success |
+| 최종 배포 | [44467318306](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44467318306), SHA `5453787dcd09157c6a2817a562de108599d44ed5`, test/build/deploy success |
+| GitHub runner 테스트 | 90 passed in 3.81s, 0 skipped, 필수 Postgres 통합 테스트 실행 |
+| API 이미지 | `ghcr.io/leedongwon9812/edr-ai-triage-lab1:5453787@sha256:6b09c25879361c4598a8d12027d93cfdbca0c4f345266752f32a511e58f066ce` |
+| rollout | revision 16→17, 새 Pod Ready 1/1·restart 0, 게시 digest 대조 |
+| CI 기존 HTTP health | PUBLIC_HEALTH_PASSED 13 samples |
+| cert-manager | v1.21.3, controller·cainjector·webhook 각 1/1 |
+| Certificate / Order | soc-public Ready=True·revision 1, ACME Order valid |
+| 인증서 | Let's Encrypt YE2, SAN soc.1.201.110.16.nip.io, 기본 CA/호스트명 검증 통과·-k 미사용 |
+| 만료 / 갱신 예약 (UTC) | 2027-02-17 04:40:16 / 2027-02-02 04:40:16 |
+| 공개 HTTPS | healthz·docs·openapi.json·alerts·approvals·stats 무인증 200 |
+| 인증 거절 | 무키 401·틀린 키 401, 실행 전 테스트 경보 상태 불변 |
+| 제외 경로 | 외부 readyz·dify/retrieval 404, 공개 schema에서도 제외 |
+| HTTP | 기존 healthz 200, docs는 HTTPS로 301 이동 |
+
+CertificateRequest already exists 일시 경고 후 인증서 발급은 자동 완료됐다. 공식 지원표 범위 밖의 k3s 1.37에서 이번 설치·webhook·발급·외부 TLS가 동작함을 확인한 것이며 공식 지원 보증은 아니다. 갱신은 예약 상태를 확인했으며 미래 실행까지 실증한 것은 아니다. 만료 전 Certificate Ready·renewalTime·controller 로그를 점검한다. cert-manager 사용량은 관측 당시 controller 25Mi·cainjector 18Mi·webhook 10Mi, CPU 각각 1m이었다.
+
+### 외부 실제 모델 1건·무료 승인/반려
+
+외부 HTTPS로 `public-verify-ba0c8b6d30-triage` 1건에 정상 Bearer 키를 전달했다. 기존 합성 경보 복사본이며 worker가 선점하지 않도록 테스트 in_progress·미래 lease로 준비했다. 무키·틀린 키 401과 상태 불변 확인 후 인증 요청을 **한 번만** 전송했다. 타임아웃 자동 재시도는 없었다.
+
+HTTP 200·22.2초·malicious·pending_approval가 반환됐고 API 로그에서 실제 OpenAI chat 200 4회·query embedding 200 1회를 확인했다. 승인 대기 리포트는 요약이므로 추가 유료 호출 없는 정상 승인으로 완료한 뒤 전체 리포트·체크포인트 usage를 대조했다. 승인 전후 usage는 같았다.
+
+| 측정 | 값 |
+| --- | --- |
+| 유료 트리아지 HTTP 요청 | 1건; 내부 chat 호출 4회 |
+| 입력 / 출력 토큰 | 14251 / 964 |
+| 추정 chat 비용 | 0.002716 USD, 설정 단가 기준. query embedding·기존 worker 비용·실제 청구 총액과 별개 |
+| 권고 출처 | 02_playbook_credential_dump.pdf·08_analyst_notes_attack_en.pdf·09_response_matrix_complex_tables.pdf |
+| 판정 근거 | event_id 2개 |
+| 해당 테스트 건의 무인증 최종 승인 | 200, usage 증가 없음 |
+
+별도 승인·반려는 기존 `al-f75e6b7d790d`의 승인 대기 상태를 `public-verify-ba0c8b6d30-approve`·`...-reject`라는 새 thread에 복제해 approval 노드만 실행했다. 원래 경보에 결정을 제출하지 않았다. API 교체 전 Postgres에 준비한 두 상태를 최종 API가 읽어 외부 무키 POST 승인/반려 각각 200·approved=true/false, 재호출 각각 409를 확인했다. 복제된 두 건을 새 LLM 판정·추가 비용 사례로 세지 않으며 최종 정확도 평가표도 바꾸지 않는다.
+
+### 보존·정리와 사용 방법
+
+테스트 경보·리포트 3개와 해당 thread의 checkpoint_writes·checkpoint_blobs·checkpoints만 삭제했다. 테스트 checkpoint 잔여 0, 원래 al-f75e6b7d790d는 pending_approval 유지, KB 121개를 확인했다. PVC 두 개의 UID/PV와 기존 Secret 값의 해시는 동일했다. soc-app-secrets에는 TRIAGE_API_KEY만 추가했다. worker·generator·OpenSearch·Postgres는 이번 작업으로 재시작하지 않았다. 로컬 테스트용 public-ci-opensearch·public-ci-postgres도 제거했다.
+
+외부 주소는 **https://soc.1.201.110.16.nip.io/docs**다. 무료 API는 바로 Execute, 유료 트리아지는 Authorize에 전용 키 값만 입력한다. 허가된 관리자의 키 복사 명령은 DEPLOYMENT.md 7절에 있다. 실제 키·인증서 개인 키는 문서·Git·로그에 남기지 않았다. OS·UFW·공유 보안 그룹은 변경하지 않았다. API 교체 후 port-forward를 다시 연결했고 localhost:18002/docs·readyz도 200이다.
+
+승인된 11개 파일만 변경했다(기본 10개+추가 승인 테스트 파일). 미추적 외부접속 계획서는 게시하지 않았다. 문서 전용 결과 커밋은 CI paths-ignore 대상이며 실행 코드 SHA는 5453787이다. 사용자별 역할·요청량/비용 상한은 추가하지 않았으며 공유 키 사용자의 반복 호출·기존 worker 비용은 별개로 남는다. 옆 팀 교차 검증은 별도다.
 
 ### 복구
 
