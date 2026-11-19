@@ -259,6 +259,72 @@ KB 이미지의 로컬 크기는 4,163,089,047바이트였다. GHCR 게시 diges
 
 Job은 완료 후 86400초에 자동 정리된다. `kubectl -n soc get jobs`, `kubectl -n soc logs job/kb-ingest`, `kubectl -n soc logs job/kb-verify-20261119`로 TTL 전 결과를 확인한다. Job 삭제 후에도 OpenSearch 후보 인덱스는 남는다. 재적재할 때는 새 Job 이름·새 후보 인덱스를 사용한다. 기록 담당자 교차 리뷰는 미완료다.
 
+## 실제 LLM·KB 활성화 (2026-11-19)
+
+허용된 변경은 `31-config.yaml`, `62-llm-verify-job.yaml`, RUNBOOK·DECISIONS·CAPACITY의 5개 파일이다. 기존 앱 이미지 `day2-stage1-8aab319`를 재사용했다. 이미지의 LLM·노드·가드레일·그래프·체크포인트·검색 모듈은 로컬과 일치했다. telemetry/tools는 로컬과 차이가 있었지만 배포 이미지에 실제 조사 도구 4개가 등록되어 있고 이번 프로세스 트리·활동 검증이 통과했다. 현재 로컬의 최신 네트워크 도구 기능 전체를 검증한 결과는 아니다.
+
+### 사전 실제 모델 검증
+
+`62-llm-verify-job.yaml`을 서버 dry-run 후 적용했다. `llm-verify-20261119`는 38초에 Complete 1/1이었다. 자동 재시도 0, deadline 900초, TTL 86400초다. 앱 이미지와 기존 Secret을 사용하고 목표 설정은 Job 환경변수로 override했다. 운영 설정을 바꾸기 전에 `ChatOpenAI`, 실제 모델 응답 `gpt-4o-mini-2024-07-18`, `chatcmpl-...` 식별자·토큰·실제 event_id·KB 청크를 확인했다.
+
+테스트는 프로젝트의 시뮬레이터·RuleEngine으로 만든 악성/정상 각 1개 사례를 실제 OpenSearch에 저장해 사용했다. `llm-verify-events-20261119-*`, `llm-verify-alerts-20261119`, `llm-verify-reports-20261119`와 고유 Postgres thread_id를 사용했다. 테스트 전용 템플릿은 별도 이름으로 만들었고 운영 `edr-events` 템플릿은 덮어쓰지 않았다. KB 후보는 읽기만 했다.
+
+| 사례 | ID | 실제 판정 | 시간 | 입력/출력 토큰 | LLM 호출 |
+| --- | --- | --- | --- | --- | --- |
+| 자격증명 덤프 (정답 악성) | `llm-verify-f4c183d7-0` | malicious, 신뢰도 0.9, 승인 대기 | 15.41초 | 6188 / 880 | 4 |
+| IT 자산 수집 (정답 정상) | `llm-verify-f4c183d7-1` | malicious, 신뢰도 0.9, 승인 대기 — 오판 | 12.47초 | 6421 / 927 | 4 |
+
+두 사례 모두 실제 도구로 조회한 기록 안에서 근거 ID를 사용했고 G-1/G-2 검사는 통과했다. 악성 사례의 근거는 `llm-f4c183d7-0-00000002`, `...00000003`이었다. 검색된 02번 플레이북 1쪽의 격리·비밀번호 초기화 정책과 권고 승인권자를 대조했다. 같은 실제 악성 권고를 별도 테스트 thread로 복제해 새 Python 프로세스에서 승인과 반려를 각각 재개했고 모두 completed였다. 이는 추가 독립 LLM 판정 2건이 아니다. 정상 사례의 오판은 숨기지 않고 아래 품질 한계로 기록했다.
+
+### 서비스 전환과 API 재시작 후 승인 검증
+
+전환 전 서비스는 API·worker·generator 각각 1개였다. API 기존 Pod에는 Secret 추가 전 환경이 남아 OpenAI 키가 없었지만 Secret에는 키가 있었다. Secret 변경 없이 새 Pod에서 키를 읽도록 재시작했다.
+
+```powershell
+$kc = 'C:\Users\Admin\.kube\edr-team.yaml'
+kubectl --kubeconfig $kc apply --dry-run=server -f infra/k8s/62-llm-verify-job.yaml
+kubectl --kubeconfig $kc apply -f infra/k8s/62-llm-verify-job.yaml
+kubectl --kubeconfig $kc -n soc logs job/llm-verify-20261119
+# Job 결과 검토 후 전환. 실행된 Job을 반복 apply해도 다시 실행되지는 않음.
+kubectl --kubeconfig $kc -n soc scale deployment/generator --replicas=0
+kubectl --kubeconfig $kc -n soc scale deployment/worker --replicas=0
+kubectl --kubeconfig $kc -n soc wait --for=delete pod -l app=worker --timeout=50s
+kubectl --kubeconfig $kc apply --dry-run=server -f infra/k8s/31-config.yaml
+kubectl --kubeconfig $kc apply -f infra/k8s/31-config.yaml
+kubectl --kubeconfig $kc -n soc rollout restart deployment/api deployment/worker
+kubectl --kubeconfig $kc -n soc rollout status deployment/api --timeout=300s
+# API 설정·readyz와 new 건수 확인 후
+kubectl --kubeconfig $kc -n soc scale deployment/worker --replicas=1
+kubectl --kubeconfig $kc -n soc rollout status deployment/worker --timeout=300s
+# 단일 테스트 경보·승인 재개 검증 후
+kubectl --kubeconfig $kc -n soc scale deployment/generator --replicas=1
+kubectl --kubeconfig $kc -n soc rollout status deployment/generator --timeout=300s
+```
+
+worker 정지 후 new=0·in_progress=0을 확인하고 전환했다. 목표 설정은 `FAKE_LLM=false`, `KB_TOOLS=real`, `INDEX_KB=kb-playbooks-d3-candidate-20261119`, `EMBED_MODEL=text-embedding-3-small`, `EMBED_DIM=1536`이며 기존 real backend·telemetry·Postgres 설정은 유지했다. API·worker 각각 새 프로세스에서 설정·모델 객체를 확인했다.
+
+운영 워커 검증용 합성 이벤트 3개를 실제 `edr-events-*`에 넣고 테스트 경보 `llm-live-20261119-approve`를 new로 만들었다. worker `worker-56b6f5b45b-kpkwl`이 선점해 16.9초에 pending_approval로 전환했다. 실제 OpenAI chat/embedding HTTP 200과 후보 KB 검색을 로그에서 확인했다. 판정은 suspicious(0.8), 근거 `llm-live-20261119-00000002`·`...00000003`, 출처는 02·08·09번 PDF였다. 같은 악성 유형도 사전 검증의 malicious와 달리 판정해 품질 변동성을 보였다.
+
+해당 실제 권고를 `llm-live-20261119-reject`의 별도 체크포인트로 복제해 반려 검증용으로 준비했다. API를 다시 rollout restart한 뒤 실제 HTTP `POST /approvals/{id}`를 내부 API에 전송했다. approve·reject 각각 HTTP 200, approval.decision은 approved·rejected, 두 경보 모두 completed였다. 리포트 trace는 `조사 → 도구 → 조사 → 판정 → 가드레일 → 권고 → 승인 → 리포트`, sources 3개, 토큰 6302/952, 추정 비용 0.001517 USD였다. 복제된 반려 리포트의 동일 토큰·비용은 추가 LLM 호출 비용이 아니다. 실제 단말 격리나 비밀번호 변경을 실행하는 코드는 없다.
+
+### 결과 확인과 품질 한계
+
+11:10 KST 기준 API·worker·generator는 각각 1/1, 기존 OpenSearch·Postgres와 함께 Pod 재시작 0회, PVC 2개 Bound였다. API readyz는 모두 true, worker heartbeat 1초, busy=0·failed=0이었다. 상태 건수는 new=0·in_progress=0·pending_approval=1377·completed=297·failed=0이었다. 중지 직전 pending_approval 1377·completed 295에서 테스트 승인/반려 2건이 completed에 추가됐다. 기존 `al-f75e6b7d790d`는 승인 대기로 보존됐다. 생성기가 계속 실행하므로 건수는 이후 증가한다.
+
+API 재시작으로 끊긴 로컬 port-forward를 `127.0.0.1:18002 → api:80`으로 다시 연결했다. `http://localhost:18002/docs`는 200이며 `/reports/llm-live-20261119-approve`에서 실제 권고·출처·승인 결과를 조회했다. 필요하면 다음 명령을 다시 실행한다.
+
+```powershell
+kubectl --kubeconfig 'C:\Users\Admin\.kube\edr-team.yaml' -n soc port-forward svc/api 18002:80 --address=127.0.0.1
+```
+
+연결·실제 판정·검색·승인 재개 검증은 완료했지만 사전 라벨 2건 중 정답 일치는 1/2다. 정상 IT 활동을 악성으로 분류했고 스캔본 OCR 손상과 검색 상위의 다른 정책 행도 영향을 줄 수 있다. 가드레일은 실제 근거 존재·개수를 검사하며 정상/악성 의미 판단의 정확성을 보증하지 않는다. 사람 승인은 유지하고, 이 결과를 전체 정확도나 운영 품질 합격으로 기록하지 않는다.
+
+OS·UFW·가비아 보안 그룹·Secret·앱 이미지·기존 프로브는 변경하지 않았다. CI/CD·Dify·외부 docs 공개는 후속 작업이다. 공인 `/healthz`는 계속 HTTP 200이며 실제 업무 API는 외부에 열지 않았다. 교차 리뷰는 미완료다.
+
+복구가 필요하면 generator·worker의 신규 처리 시작을 제어하고 ConfigMap을 이전 `FAKE_LLM=true`, `KB_TOOLS=mock`으로 복원하며 이번 추가 키(INDEX_KB·EMBED_MODEL·EMBED_DIM)는 이전 상태와 대조해 복구한다. API·worker 재시작 후 설정·readiness·replica를 재확인한다. 이미지 rollout undo만으로 ConfigMap이 복구되지는 않는다. 테스트 인덱스·리포트·체크포인트는 검증 근거로 보존했으며 Job TTL은 86400초다.
+
+생성기 복원 후 자연 생성된 경보 `al-170635837113`·`al-9397d8e1a798`도 실제 워커가 각각 13.5초·11.6초에 승인 대기로 처리했다. 마지막 관측에서 워커 메트릭은 processed=1·pending_approval=3·failed=0이었고 다음 경보를 처리 중이었다. 이는 초기 테스트 표의 비용 합계에 포함하지 않았다.
+
 ## 공통 1차 확인
 ```bash
 kubectl -n soc get pods,svc,ingress,pvc,jobs
