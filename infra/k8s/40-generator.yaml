@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: generator
+  namespace: soc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: generator
+  template:
+    metadata:
+      labels:
+        app: generator
+    spec:
+      terminationGracePeriodSeconds: 30
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: generator
+          image: ghcr.io/leedongwon9812/edr-ai-triage-lab1:day2-stage1-8aab319
+          imagePullPolicy: Always
+          command:
+            - python
+            - -m
+            - soc.simulator.run
+            - --loop
+          envFrom:
+            - configMapRef:
+                name: soc-app-config
+          env:
+            - name: SIM_BENIGN_PER_TICK
+              value: "1"
+            - name: SIM_TICK_SEC
+              value: "10"
+            - name: SIM_ATTACK_EVERY_TICKS
+              value: "6"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from ipaddress import ip_address, ip_network
 
 from langchain_core.tools import tool
 
@@ -23,6 +24,12 @@ MAX_ANCESTORS = 5
 MAX_CHILDREN = 20
 ACTIVITY_LIMIT = 50
 TIMELINE_LIMIT = 100
+NETWORK_LIMIT = 1000
+NETWORK_DESTINATIONS = 20
+NETWORK_EVIDENCE = 5
+INTERNAL_NETWORKS = tuple(ip_network(cidr) for cidr in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7",
+))
 
 
 def _search(body: dict) -> list[dict]:
@@ -184,4 +191,66 @@ def get_host_timeline(host: str, around_ts: str, minutes: int = 10) -> dict:
 
 
 
-TELEMETRY_TOOLS = [tool(get_process_tree), tool(get_process_activity), tool(get_host_timeline)]
+def _external_ip(value: str) -> bool:
+    """실습용 문서 IP도 외부로 센다. is_global은 해당 주소를 제외하므로 쓰지 않는다."""
+    try:
+        address = ip_address(value)
+    except ValueError:
+        return False
+    return not (address.is_loopback or address.is_link_local or address.is_multicast
+                or address.is_unspecified or any(address in net for net in INTERNAL_NETWORKS))
+
+
+def get_network_connections(host: str, minutes: int) -> dict:
+    """호스트의 최근 외부 IP 통신을 횟수와 평균 간격으로 요약합니다.
+
+    주기적인 외부 통신이나 비컨이 의심될 때 이 도구를 선택하세요. 현재 UTC 시각부터
+    직전 minutes분의 network 기록을 조사하며, 실제 event_id가 든 최근 기록도 돌려줍니다.
+    내부망 통신이나 특정 프로세스의 상세 활동은 다른 조사 도구로 확인하세요.
+
+    Args:
+        host: 조사할 PC 이름 (예: WS-007)
+        minutes: 현재 시각부터 거슬러 볼 분 수 (0보다 큰 정수)
+    """
+    host, minutes = _check_host(host), _check_minutes(minutes)
+    end = datetime.now(timezone.utc)
+    try:
+        start = end - timedelta(minutes=minutes)
+    except OverflowError:
+        raise ValueError("minutes가 너무 큽니다") from None
+
+    # 최근 1,000건만 집계한다. 한 건을 더 받아 결과가 잘렸는지 확인한다.
+    rows = _search({"size": NETWORK_LIMIT + 1,
+                    "sort": [{"ts": "desc"}, {"event_id": "desc"}],
+                    "query": {"bool": {"filter": [
+                        {"term": {"host": host}}, {"term": {"type": "network"}},
+                        {"range": {"ts": {"gte": _iso(start), "lte": _iso(end)}}},
+                    ]}}})
+    event_limit_hit = len(rows) > NETWORK_LIMIT
+    groups: dict[str, list[dict]] = {}
+    for event in rows[:NETWORK_LIMIT]:
+        ip = (event.get("network") or {}).get("dst_ip")
+        if ip and _external_ip(ip):
+            groups.setdefault(ip, []).append(event)
+
+    connections = []
+    for ip, events in groups.items():
+        events.sort(key=lambda e: (_parse_ts(e["ts"]), e["event_id"]))
+        times = [_parse_ts(e["ts"]) for e in events]
+        interval = ((times[-1] - times[0]).total_seconds() / (len(times) - 1)
+                    if len(times) > 1 else None)
+        connections.append({
+            "dst_ip": ip, "count": len(events),
+            "first_ts": events[0]["ts"], "last_ts": events[-1]["ts"],
+            "avg_interval_seconds": round(interval, 2) if interval is not None else None,
+            "events": [summarize(e) for e in events[-NETWORK_EVIDENCE:]],
+            "events_truncated": len(events) > NETWORK_EVIDENCE,
+        })
+    connections.sort(key=lambda x: (-x["count"], x["dst_ip"]))
+    return {"host": host, "from": _iso(start), "to": _iso(end),
+            "connections": connections[:NETWORK_DESTINATIONS],
+            "truncated": event_limit_hit or len(connections) > NETWORK_DESTINATIONS}
+
+
+TELEMETRY_TOOLS = [tool(get_process_tree), tool(get_process_activity), tool(get_host_timeline),
+                   tool(get_network_connections)]

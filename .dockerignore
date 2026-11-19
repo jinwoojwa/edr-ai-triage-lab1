@@ -7,3 +7,15 @@ instructor
 docs
 tests/__pycache__
 data/sim*.jsonl
+*.pem
+*.kubeconfig
+kubeconfig
+.kube
+infra
+tests
+data/kb
+work
+outputs
+*.md
+**/__pycache__
+**/*.pyc

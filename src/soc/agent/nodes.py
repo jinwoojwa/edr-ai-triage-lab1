@@ -135,11 +135,23 @@ def approval(state: TriageState) -> dict:
     """
     actions = state["recommendation"]["actions"]
     risky = [a for a in actions if a["action"] in DANGEROUS_ACTIONS]
-    # TODO[H-1]: 위험한 조치가 있으면 interrupt()로 멈추고, 승인권자가 판단할 내용을 넘깁니다.
-    # (01번 정책 PDF 5장: 대상 호스트, 판정과 신뢰도, ATT&CK 기법, 근거 event_id, 권고 조치)
-    # 재개되면 interrupt()가 사람의 결정({"approved": bool, "approver": str, "comment": str})을 돌려줍니다.
-    # 돌려줄 것: approval {"required", "decision", ...}, trace ["승인"]
-    return {"approval": {"required": bool(risky), "decision": "not_implemented"}, "trace": ["승인"]}
+    if not risky:
+        return {"approval": {"required": False, "decision": "not_required"}, "trace": ["승인"]}
+
+    alert, verdict = state["alert"], state["verdict"]
+    decision = interrupt({
+        "alert_id": alert["alert_id"], "host": alert["host"],
+        "verdict": verdict["verdict"], "confidence": verdict["confidence"],
+        "techniques": verdict.get("techniques", []),
+        "evidence_event_ids": verdict.get("evidence_event_ids", []),
+        "actions": actions,
+    })
+    approved = decision["approved"]
+    return {"approval": {
+        "required": True, "decision": "approved" if approved else "rejected",
+        "approved": approved, "approver": decision.get("approver", ""),
+        "comment": decision.get("comment", ""),
+    }, "trace": ["승인"]}
 
 
 # ---------------------------------------------------------------------------- 리포트

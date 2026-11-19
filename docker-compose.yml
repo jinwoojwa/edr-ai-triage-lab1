@@ -72,6 +72,8 @@ services:
       POSTGRES_DSN: postgresql://soc:${POSTGRES_PASSWORD}@postgres:5432/soc
       FAKE_LLM: ${FAKE_LLM:-true}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      TELEMETRY_TOOLS: real
+      KB_TOOLS: real
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
