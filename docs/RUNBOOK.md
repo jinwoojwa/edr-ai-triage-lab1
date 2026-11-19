@@ -381,9 +381,49 @@ GHCR package Actions 접근 설정을 사용자가 반영한 후 run `4445993063
 
 사용자가 전용 SSH 키 등록과 dongwon·main 게시(기존 32커밋 포함)를 승인했다. CI 전용 ed25519 공개 키만 ubuntu authorized_keys에 restrict 옵션으로 추가했고, 전용 키의 SSH·sudo k3s 조회를 확인했다. 기존 개인 키는 업로드하지 않았다. GitHub Environment soc에 main branch 제한·required reviewer와 네 SSH Secrets를 등록했다. OS·UFW·가비아 보안 그룹·기존 클러스터 Secret은 변경하지 않았다.
 
-현재 상태: 로컬 테스트 67개 통과, JUnit 필수 통합 테스트·skip 0 확인, actionlint 1.7.12·bash -n·ShellCheck warning 이상 검사·embedded Python 구문·git diff --check 모두 통과했다. 서버 read-only 사전 점검에서 python3·flock·sudo k3s kubectl 사용 가능, API 1/1, PVC 20Gi·10Gi Bound였다. 원격 게시·배포·고장 복구는 승인 및 실제 실행 대기다. workflow URL·신규 SHA/digest·revision·복구 시간은 아직 없다. 교차 진단 나눔과 옆 팀 검증도 미완료다.
+로컬 테스트 67개, JUnit 필수 통합 테스트·skip 0, actionlint 1.7.12·bash -n·ShellCheck warning 이상 검사·embedded Python 구문·git diff --check를 통과한 뒤 실제 Actions에서도 검증했다. 서버 사전 점검에서 python3·flock·sudo k3s kubectl 사용 가능, API 1/1, PVC 20Gi·10Gi Bound였다.
 
-`11-api.yaml`의 소스 기본 이미지는 현재 실행 중인 유효한 수동 태그를 유지한다. CI가 이 파일을 읽고 테스트한 새 SHA tag@digest로 렌더링한 결과만 적용한다. 아직 게시되지 않은 SHA를 기본값으로 적어 수동 apply 시 pull 오류가 생기게 하지 않는다. 이후에도 CI 적용 결과를 이 기본 파일로 덮어쓰지 않는다.
+#### 보강 후 정상 배포와 롤백 실습: 완료
+
+| 항목 | 실제 결과 |
+| --- | --- |
+| 배포 코드 | `d202ee9614f69637eeee34b879579b7d5835dfe6` |
+| 이미지 | `ghcr.io/leedongwon9812/edr-ai-triage-lab1:d202ee9` |
+| digest / Pod imageID | `sha256:7a80be112acc36658e1a635f8f15b2177dce8bf0b75634203bd632e7a033fb83`로 일치 |
+| 정상 main push | [44460914705](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44460914705), test/build/deploy success |
+| CI 실제 DB 테스트 | 67 passed in 3.60s, skip 0·필수 Postgres 재개 테스트 확인 |
+| 정상 rollout | 이전 revision 12 → 새 revision 13, 내부 healthz·readyz 통과 |
+| 외부 정상 배포 표본 | 11/11 HTTP 200 |
+| 수동 고장 실습 | [44461056039](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44461056039), test/build/deploy success |
+| 동일 SHA 재실행 | 기존 이미지 전체 commit label 확인·digest 재사용, build-push skip |
+| 고장 | revision 14, `drill-d202ee9-missing` → ErrImagePull/ImagePullBackOff·rollout 미완료 |
+| 서비스 유지 | 정상 `api-d446d584d-fk5gh` 1/1 유지, 실패 Pod `api-85b8589f6f-ph2fv`만 0/1 |
+| 복구 | 정상 revision 13으로 undo → 최종 revision 15 |
+| 복구 시간 | 주입부터 정상 확인까지 48초, 의도한 실패 대기 45초 포함 |
+| 외부 고장 실습 표본 | 23/23 HTTP 200 |
+
+실제 로그의 핵심 출력:
+
+```text
+PREVIOUS_REVISION=13
+DEPLOYED_REVISION=13
+DRILL_RECOVERY_SECONDS=48
+ROLLBACK_DRILL_PASSED
+DEPLOY_SUCCEEDED image=ghcr.io/leedongwon9812/edr-ai-triage-lab1:d202ee9@sha256:7a80be112acc36658e1a635f8f15b2177dce8bf0b75634203bd632e7a033fb83 commit=d202ee9614f69637eeee34b879579b7d5835dfe6 revision=15
+PUBLIC_HEALTH_PASSED 23 samples
+```
+
+외부 표본은 약 2초 간격이며 모든 순간·모든 부하의 무중단 보장은 아니다. 초기 실패 실행은 failure로 보존했고 성공으로 바꾸지 않았다. 수정 후 두 실행은 success다. `dongwon` push는 test 성공 뒤 build/deploy가 skip되어 브랜치 제한도 확인했다. 문서만 변경한 후속 기록 커밋은 CI paths-ignore 대상이므로 실행 이미지의 코드 SHA는 계속 d202ee9다.
+
+#### 데이터·설정 보존과 정리
+
+배포 직전/최종 관측에서 경보 1919→1932, 리포트 1919→1932, 체크포인트 16037→16141이었다. 생성기·워커가 계속 실행 중이므로 증가한 값이며 CI가 합성 경보를 추가한 것은 아니다. KB 후보는 121개로 유지됐다. 기존 `llm-live-20261119-approve`·`llm-live-20261119-reject` 리포트 조회는 모두 HTTP 200이다. `al-f75e6b7d790d`는 pending_approval이고 새 프로세스가 Postgres에서 next=[approval]·interrupts=1을 읽었다. 승인/반려 결정을 새로 제출하지 않았다.
+
+최종 API Pod Ready 1/1·restart 0, worker·generator Ready 1/1, OpenSearch·Postgres 정상, PVC 이름·volume 및 Bound 상태 유지다. `FAKE_LLM=false`, `KB_TOOLS=real`, `TELEMETRY_TOOLS=real`, `BACKEND=real`, `CHECKPOINTER=postgres`를 확인했다. DB·PVC·클러스터 Secret·ConfigMap·Ingress·OS·방화벽은 변경하지 않았다. 승인된 SSH 공개 키와 GitHub Environment 설정만 추가했다. 고장 Pod는 undo로 제거됐고 워크플로 임시 파일은 cleanup했다. 로컬 CI용 Docker 컨테이너 2개도 제거했다.
+
+API 교체로 종료된 port-forward를 숨김 프로세스로 다시 연결했고 localhost:18002의 healthz·readyz·docs 모두 HTTP 200이다. 외부는 계속 Exact /healthz만 공개한다. 검증용 로컬 전용 키 파일은 제거했으며 의도한 GitHub Environment Secret·서버 공개 키 등록은 유지한다. 최종 Deployment의 minReadySeconds·preStop·종료 유예·revision 15·digest도 실제 조회해 대조했다. 실행 로그·test-results·deployment-evidence는 위 Actions에서 확인한다. 교차 진단 나눔과 옆 팀 검증은 미완료다.
+
+`11-api.yaml`의 소스 기본 이미지는 최초 CI 구성 시점의 유효한 수동 태그를 보존한다. CI가 이 파일을 읽고 테스트한 새 SHA tag@digest로 렌더링한 결과만 적용한다. CI 이후 이 소스 파일을 그대로 수동 apply하면 이전 이미지로 되돌아가므로 사용하지 않는다. 운영 배포는 workflow 또는 검증한 tag@digest를 렌더링하는 절차로 진행한다.
 
 ## 공통 1차 확인
 ```bash

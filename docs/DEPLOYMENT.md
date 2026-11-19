@@ -105,7 +105,7 @@ CI의 OpenSearch 2.19.0·Postgres 16에 실제 연결한 뒤 Dify 파일만 제�
 
 Actions 화면에서 main의 workflow를 선택하고 Run workflow의 `rollback_drill=true`로 고장·복구를 함께 시험한다. Environment 승인 대기 중에는 Review deployments에서 커밋과 이미지를 확인한다. 서버 키·Git 게시 승인까지 끝나기 전에는 실제 실행 완료로 판단하지 않는다.
 
-`deploy.sh`는 API Deployment·Service만 서버 dry-run 후 적용하고, 이미지 tag@digest·Pod imageID·내부 health/ready·외부 health를 검사한다. maxUnavailable=0, maxSurge=1, history 5, deadline 240초, rollout 대기 300초다. 배포는 GitHub concurrency와 서버 flock으로 직렬화하며 오래된 main 실행은 거부한다. 정상 상태를 기록하기 전에 실패하면 undo하지 않는다. 변경 후 실패하면 기록한 정상 revision으로 undo하며 원래 실행은 실패로 남긴다.
+`deploy.sh`는 API Deployment·Service만 서버 dry-run 후 적용하고, 이미지 tag@digest·Pod imageID·내부 health/ready·외부 health를 검사한다. maxUnavailable=0, maxSurge=1, history 5, deadline 240초, rollout 대기 300초다. minReadySeconds=10·preStop 대기 10초·종료 유예 45초를 둔다. 배포는 GitHub concurrency와 서버 flock으로 직렬화하며 오래된 main 실행은 거부한다. 정상 상태를 기록하기 전에 실패하면 undo하지 않는다. 변경 후 실패하면 기록한 정상 revision으로 undo하며 원래 실행은 실패로 남긴다. 소스 매니페스트의 기본 이미지 대신 workflow가 렌더링한 SHA tag@digest를 적용한다.
 
 고장 실습은 존재하지 않는 새 이미지로 45초간 rollout 실패를 관찰하고, 기존 Ready Pod 유지 확인 후 방금 검증한 정상 revision으로 복원한다. public-health artifact는 2초 간격 표본이며 모든 순간의 무중단을 보증하지 않는다. `deploy.log`에는 이전/신규 revision·실제 digest·복구 시간이 남는다.
 
@@ -124,6 +124,9 @@ image pull 오류는 실패 Pod describe Events, readiness 실패는 readyz와 D
 
 | 단계 | 결과 | 남은 일 |
 | --- | --- | --- |
-| 로컬 CI 기준 테스트 | 실제 격리 OpenSearch·Postgres, Dify 제외 67 passed·0 skipped | GitHub runner 실행 확인 |
-| 자동 게시·배포·롤백 | 구현·actionlint·bash -n·ShellCheck·Python 구문 검사 통과 | 접속 키 등록·Git 게시 승인 후 실제 실행 |
+| CI 테스트 | 로컬 및 GitHub runner 실제 격리 DB, Dify 제외 67 passed·0 skipped | 모델 품질 평가는 별도 |
+| 정상 자동 배포 | [main push 44460914705](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44460914705) success, SHA d202ee9·digest 대조, revision 13, 외부 11/11 HTTP 200 | main은 승인 후 API만 배포 |
+| 실패 감지 | 최초 외부 502 1회 감지 → 실행 failure·기존 정상 revision 자동 복구 | 종료 대기 설정을 보강함 |
+| 보강 후 롤백 | [44461056039](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44461056039) success, 동일 SHA 재사용·고장 이미지 실패·48초 복구·최종 revision 15, 외부 23/23 HTTP 200 | 표본 관측이며 절대 무중단 보장 아님 |
+| 데이터 보존 | KB 121개·PVC 2개·기존 리포트·승인 대기 체크포인트 확인, 로컬 docs HTTP 200 | 상세 건수·로그는 RUNBOOK |
 | 옆 팀 검증 | 미완료, 검증 팀 미지정 | 옆 팀이 가이드대로 실행하고 질문·해결 기록 |

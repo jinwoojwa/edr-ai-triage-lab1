@@ -217,9 +217,13 @@ Environment `soc`의 승인 후 기존 SSH 경로로 배포하며, known_hosts �
 
 이전 정상 revision을 기록하고 CI가 렌더링한 API 매니페스트만 dry-run·apply한다. 새 이미지의 Pod health/ready와 digest, 외부 health를 확인한다. 실패 시 원인 수정 전에 기록한 정상 revision으로 undo하며 복구 성공도 최초 실패를 성공으로 바꾸지 않는다. 자동 undo는 Kubernetes 자체 기능이 아니라 이번 스크립트의 동작이다. ConfigMap·Secret·DB는 undo 범위가 아니다.
 
-실제 Actions 게시·승인 배포·이미지 고장 및 복구 검증은 접속/게시 승인을 기다린다. 구현만으로 인프라 7단계 완료를 기록하지 않는다. 외부 공개는 `/healthz`만 유지한다. 옆 팀 검증과 기록 담당자 교차 리뷰는 미완료다.
+사용자 승인 후 전용 SSH 키·Environment를 등록하고 main에 게시했다. 외부 공개는 `/healthz`만 유지한다. 옆 팀 검증과 기록 담당자 교차 리뷰는 미완료다.
 
-첫 실제 실행에서 이미지 게시·새 digest 배포·고장 이미지 실패·48초 복구는 통과했지만 초기 교체 구간의 외부 502가 1회 관측됐다. 외부 게이트를 유지해 실행 실패 및 원래 revision 복구를 확인했다. 단순 maxUnavailable=0만으로 Ingress 갱신 시간차까지 제거했다고 주장하지 않는다. API 매니페스트에 minReadySeconds 10초·preStop 대기 10초·종료 유예 45초를 추가하고 다시 관측한다. 이는 승인된 API 파일 안의 워크로드 설정이며 서버 OS·방화벽 변경은 아니다.
+첫 실제 실행에서 이미지 게시·새 digest 배포·고장 이미지 실패·48초 복구는 통과했지만 초기 교체 구간의 외부 502가 1회 관측됐다. 외부 게이트를 유지해 실행 실패 및 원래 revision 복구를 확인했다. 단순 maxUnavailable=0만으로 Ingress 갱신 시간차까지 제거했다고 주장하지 않는다. API 매니페스트에 minReadySeconds 10초·preStop 대기 10초·종료 유예 45초를 추가했다. 이는 승인된 API 파일 안의 워크로드 설정이며 서버 OS·방화벽 변경은 아니다.
+
+보강 커밋 `d202ee9`의 [main push 실행](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44460914705)은 test·build·deploy 모두 success였다. 테스트 67 passed·0 skipped, 새 digest와 Pod imageID 일치, revision 12→13, 외부 health 11/11 HTTP 200을 확인했다. [동일 SHA 수동 고장 실습](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44461056039)도 모두 success였다. 기존 SHA digest를 재사용하고 build-push 단계는 skip됐다. 고장 revision 14의 ErrImagePull/ImagePullBackOff 중 정상 Pod가 유지됐고, 정상 revision 13으로 undo해 최종 revision 15가 됐다. 고장 주입부터 복구까지 48초(의도한 rollout 실패 대기 45초 포함), 외부 표본 23/23 HTTP 200이었다. 이 두 관측으로 모든 상황의 무중단을 보증하지 않는다.
+
+최종 API는 `d202ee9@sha256:7a80be112acc36658e1a635f8f15b2177dce8bf0b75634203bd632e7a033fb83`, Ready 1/1·restart 0이며 real LLM/KB·Postgres 설정을 유지한다. KB 121개, PVC 2개, 기존 승인·반려 리포트 조회, 승인 대기 `al-f75e6b7d790d`의 실제 Postgres 체크포인트(다음 노드 approval·interrupt 1)를 확인했다. 인프라 7단계의 구현·게시·정상 배포·실패 감지·롤백 검증은 완료다. 최종 모델 품질 평가·교차 리뷰는 별도다.
 
 ### 평가: 기준점(2일차)과 최종(3일차)
 
