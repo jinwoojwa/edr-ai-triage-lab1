@@ -371,6 +371,14 @@ Pod template annotation `soc.lab/commit`·OCI revision label은 전체 SHA, 이�
 
 ### 실제 원격 실행 기록
 
+#### 첫 배포의 외부 502 감지 및 자동 복구
+
+GHCR package Actions 접근 설정을 사용자가 반영한 후 run `44459930637` attempt 2에서 게시가 통과했다. SHA `0f6430a`, digest `sha256:3340d4cbcd69d0ca41f6e7ca7c4bbe0491426dd32306bd687945055e4a9cde98`의 새 Pod를 확인했다. revision 8→9 정상 배포, 존재하지 않는 태그의 ImagePullBackOff, 기존 Ready Pod 유지, 정상 revision 9로 undo(새 revision 11)까지 48초에 완료했다.
+
+그러나 외부 health 표본에 `2026-11-19T04:46:33Z 502`가 1회 있어 전체 실행을 실패 처리했다. 실패를 무시하지 않고 이전 정상 revision 8로 추가 복구(새 revision 12)했고 내부 health/ready를 재확인했다. 따라서 이 실행은 CI/CD 최종 성공으로 세지 않는다. 배포 후 외부 검사 실패 경로의 자동 rollback과 실패 상태 보존은 검증됐다.
+
+502 시각이 초기 Pod 교체 구간과 일치해 API 종료와 Ingress endpoint 갱신의 시간차를 원인으로 의심한다. 허용된 `11-api.yaml`에 minReadySeconds=10, preStop의 Python sleep 10초, terminationGracePeriodSeconds=45를 추가했다. 새 Pod가 안정적으로 Ready인 동안 기존 Pod를 유지하고, 이후 종료되는 Pod가 경로 변경 전파 시간 동안 요청을 받을 수 있게 한다. 기존 Pod에는 새 lifecycle이 소급되지 않으므로 첫 전환과 이후 전환을 실제 외부 관측으로 구분한다. 검사를 완화하지 않고 후속 정상 배포·롤백 실습을 다시 수행한다. [Kubernetes 종료 절차](https://kubernetes.io/docs/concepts/workloads/pods/pod-termination/)
+
 사용자가 전용 SSH 키 등록과 dongwon·main 게시(기존 32커밋 포함)를 승인했다. CI 전용 ed25519 공개 키만 ubuntu authorized_keys에 restrict 옵션으로 추가했고, 전용 키의 SSH·sudo k3s 조회를 확인했다. 기존 개인 키는 업로드하지 않았다. GitHub Environment soc에 main branch 제한·required reviewer와 네 SSH Secrets를 등록했다. OS·UFW·가비아 보안 그룹·기존 클러스터 Secret은 변경하지 않았다.
 
 현재 상태: 로컬 테스트 67개 통과, JUnit 필수 통합 테스트·skip 0 확인, actionlint 1.7.12·bash -n·ShellCheck warning 이상 검사·embedded Python 구문·git diff --check 모두 통과했다. 서버 read-only 사전 점검에서 python3·flock·sudo k3s kubectl 사용 가능, API 1/1, PVC 20Gi·10Gi Bound였다. 원격 게시·배포·고장 복구는 승인 및 실제 실행 대기다. workflow URL·신규 SHA/digest·revision·복구 시간은 아직 없다. 교차 진단 나눔과 옆 팀 검증도 미완료다.
