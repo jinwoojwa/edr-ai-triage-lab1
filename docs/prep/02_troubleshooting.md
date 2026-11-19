@@ -195,12 +195,145 @@ psycopg.OperationalError: connection failed: FATAL:  password authentication fai
 
 #### 고장 예상표 (둘 다 같은 양식, 2줄 이상)
 
-| 이런 고장이 나면 | 에이전트 리포트에 보일 증상 | 처음 확인할 곳 |
-|---|---|---|
-| (예: 06번 스캔본이 빈 내용으로 들어감) | (예: 오탐 처리 기준을 물으면 엉뚱한 문서를 근거로 답함) | (예: 적재 결과에서 06번 문서의 글자 수) |
-| | | |
+### D3-10 고장 예상표 마무리 — 2026-11-19
 
-> 2일차 깨 보기와 3일차 평가에서 **내 예상이 맞았는지** 이 표와 비교합니다. 틀린 예상도 좋은 기록입니다.
+현재 세션의 **1~6단계 원본 명령 출력·복구 보고**와 [RUNBOOK](../RUNBOOK.md), [인프라 실습 안내](../guide/INFRA_STAGES.md), [DECISIONS](../DECISIONS.md)를 대조했다. 이어 사용자 요청으로 **7단계의 세 가지 고장을 직접 추가 주입·원복**하고 아래 결과를 반영했다. 1~6단계는 과거 기록이며, 최종 성능 평가는 이번 범위에 포함하지 않는다.
+
+**기록의 범위:** 기존 개인 예상표는 예시와 빈칸만 있었으므로 아래 ‘예상’은 실습 안내의 기대 증상이다. 실제 결과를 사전 예측으로 소급하지 않는다. 최초 작성 때 RUNBOOK에 없어서 근거 미확인으로 둔 1~6단계 항목은 **세션 원본을 재열람해 실제 재현·복구 결과로 정정**했다. 요청·승인만으로 완료를 판단하지 않았으며, 과거 관측을 현재 서버의 재점검 결과로 표현하지 않는다.
+
+- **일치:** 예상한 증상과 복구를 실제 출력으로 확인했다.
+- **조건 명시:** 실제 재현·복구했지만 추가 조건이나 검증 범위를 함께 밝혀야 한다.
+- **예상과 다름:** 고장은 재현됐으나 실제 HTTP 코드 등이 안내와 달랐다.
+- **대체 검증:** 안내와 다른 고장을 주입해 같은 복구 목적을 검증했다.
+- **별도 미검증:** 유사 기록은 있으나 해당 조건의 직접 주입 결과는 확인되지 않는다.
+
+#### 세션 원본 근거
+
+같은 세션 `01a1eceb-5ab8-7670-ac5d-062aa4a94b53`의 아래 턴에서 명령 출력과 최종 보고를 확인했다. 시간은 2026-11-19 KST의 요청 시작 시각이며 복구 소요 시간이 아니다. S1~S6는 아래 표의 출처 표기다. 비밀번호·키·Secret 원문은 옮기지 않았다.
+
+| 출처 | 시각 / 원본 턴 ID | 확인한 정리·원복 근거 |
+| --- | --- | --- |
+| S1 | 11:29 / `01a1f1a3-7409-7ba0-b22d-f40c72159971` | 테스트 Pod 0·Deployment/Service 제거·임시 kubeconfig 0·운영 설정 동일 |
+| S2 | 11:33 / `01a1f1a7-3a36-7942-a422-154c4f3d9967` | sysctl 262144·영구 파일 해시 동일·테스트 namespace/PV 제거·복구 타이머 0 |
+| S3 | 11:42 / `01a1f1af-5ed4-79a2-9f83-7b40995bab5b` | 테스트 Secret 제거·테스트 리소스/PV 잔여 0·운영 설정/Secret 동일 |
+| S4 | 11:47 / `01a1f1b3-c9ee-76a2-a191-eab02780a573` | 테스트 워크로드·DB·Secret·인덱스·볼륨 정리·운영 설정 동일 |
+| S5 | 11:58 / `01a1f1be-2ac1-78b3-9eb5-2c5c147bcd93` | 임시 DROP 제거·UFW 규칙 동일·타이머 0·테스트 리소스 제거 |
+| S6 | 12:12 / `01a1f1ca-409b-79a1-8e55-70e6fc83a483` | 테스트 Job/Pod 잔여 0·운영 setup/kb-ingest Complete·KB 121개 보존 |
+| S7 | Actions / RUNBOOK 7단계 | 새 SHA 배포·고장 이미지 실패·48초 복구·외부 23/23 HTTP 200 |
+| S8 | 14:18 이후 추가 실습 / [Actions 44464284446](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44464284446) | 실제 즉시 종료 이미지의 CrashLoop·undo, packages 쓰기 권한 제거·대문자 이름 거부 재현. 임시 브랜치/리소스/이미지 정리·운영 설정 동일 |
+
+#### 1단계 · 서버 준비와 첫 Deployment
+
+| ID / 고장 | 예상 증상 | 실제 결과·비교 | 처음 확인할 곳 | 복구·원복 / 근거 |
+| --- | --- | --- | --- | --- |
+| 1-1 이미지 태그 오타 | ErrImagePull·ImagePullBackOff | **일치.** 테스트 Deployment의 존재하지 않는 태그 → not found·ImagePullBackOff | `describe pod <실패 Pod>` Events | 정상 태그 복원 후 `RESTORED_TAG HTTP 200`. 테스트 리소스 정리. S1; RUNBOOK의 이전 `[1-1]`도 별도 근거 |
+| 1-2 private 이미지 인증 제거 | unauthorized·이미지 pull 실패 | **일치.** anonymous token 조회 401 Unauthorized → ImagePullBackOff. 게시 권한 403과 별개 | Pod Events·imagePullSecrets 참조/존재 | 인증 복원 후 HTTP 200. 운영 pull 인증은 유지. S1 |
+| 1-3 targetPort 불일치 | Pod 정상이어도 접속 실패 | **일치.** 수신 포트 8000에 Service targetPort=8001 → Pod Running/Ready·Connection refused | Service targetPort·실제 수신 포트·EndpointSlice | targetPort=8000 복원 후 HTTP 200. containerPort 선언만 바꾼 실험이 아님. S1 |
+| 1-4 kubeconfig server=127.0.0.1 | 노트북에서 connection refused | **일치.** 임시 파일의 `https://127.0.0.1:6443` → exit 1·actively refused | `kubectl config view --minify`의 server; raw 인증 정보 출력 금지 | 임시 파일 삭제·정상 kubeconfig로 edr-team1 Ready, `TEMP_CONFIG_FILES 0`. S1 |
+
+#### 2단계 · OpenSearch StatefulSet
+
+| ID / 고장 | 예상 증상 | 실제 결과·비교 | 처음 확인할 곳 | 복구·원복 / 근거 |
+| --- | --- | --- | --- | --- |
+| 2-1 vm.max_map_count=65530 | bootstrap 실패·CrashLoopBackOff | **조건 명시.** 테스트 Pod에 bootstrap 강제 검사를 적용해 CrashLoopBackOff·is too low 확인. single-node 기본에서는 경고만 날 수 있음 | OpenSearch 로그·`logs --previous`, `sysctl vm.max_map_count` | 262144 복원 후 테스트 Pod Ready·PVC marker 보존. 영구 파일 해시 동일·타이머 제거. S2 |
+| 2-2 heap 2g·limit 2Gi | OOMKilled | **일치.** 실제 종료 reason=OOMKilled·exitCode=137 | Pod state/Last State·Events | 테스트 heap 512m 복원 후 Ready. S2 |
+| 2-3 StorageClass 오타 | PVC/Pod Pending | **일치.** local-path-drill-typo → StorageClass not found·unbound PVC·FailedScheduling | `describe pvc` → `describe pod` | 테스트 리소스를 정상 StorageClass로 재생성 → Bound·Ready. 운영 PVC 유지. S2; 이전 RUNBOOK `[2-3]`과 별도 실습 |
+| 2-4 requests.memory=64Gi | Pending·Insufficient memory | **일치.** 테스트 Pod Pending·FailedScheduling·Insufficient memory | Pod Events·노드 allocatable/예약 requests | 요청량 복원한 테스트 Pod Ready. S2 |
+| 2-5 단일 노드 replica=1 | yellow·미할당 복제본 | **일치.** 별도 테스트 클러스터에서 green→yellow·unassigned_shards=1 | `_cluster/health` → `_cat/shards`·index settings | replica=0 → green·미할당 0. 운영의 기존 top_queries yellow는 별개로 유지. S2 |
+
+**범위:** 커널 값은 서버 전체에 일시 변경했고 사용자 승인을 받았다. 강제 검사는 테스트 Pod에만 적용했다. 운영 OpenSearch는 동일 UID·restart 0이었고, 테스트 namespace·Pod·PVC·PV를 정리했다. 운영 KB 121개·PVC·외부 health 200을 확인했다. 같은 서버의 Pod 재생성 시 데이터 보존도 확인했지만 서버 디스크 소실·백업 복구 검증은 아니다.
+
+#### 3단계 · Postgres·Secret·ConfigMap
+
+| ID / 고장 | 예상 증상 | 실제 결과·비교 | 처음 확인할 곳 | 복구·원복 / 근거 |
+| --- | --- | --- | --- | --- |
+| 3-1 Secret 삭제 후 API 재시작 | CreateContainerConfigError | **일치.** 테스트 Secret 삭제 → `secret ... not found`·CreateContainerConfigError | Pod Events·envFrom Secret 참조/존재 | Secret 복원 → readyz 200·모든 항목 true. S3 |
+| 3-2 초기화 후 Secret 비밀번호만 변경 | password authentication failed | **일치.** 실제 API가 읽는 POSTGRES_DSN의 비밀번호도 잘못 바꿈 → DB 인증 실패·readyz 503 | API/DB 인증 로그·DSN 참조·기존 DB 계정 일치 여부 | 원래 테스트 비밀번호 복원 → readyz 200. 초기화된 DB의 계정 비밀번호가 Secret 변경으로 바뀌지 않음을 확인. S3 |
+| 3-3 DSN 호스트 localhost | Connection refused | **일치.** 테스트 API DSN 변경 → 127.0.0.1:5432 Connection refused·readyz 503 | DSN 호스트·Pod 내부 연결 경로 | 테스트 DB Service 이름 복원 → readyz 200. 과거 pg_isready 대조만이 아니라 API 실험까지 확인. S3 |
+| 3-4 ConfigMap 변경 후 재시작 생략 | 기존 Pod 환경변수 유지 | **일치.** desired=after인데 같은 Pod의 marker=before 유지 | ConfigMap과 Pod의 비밀 아닌 환경변수 대조 | 재시작 후 after 확인, 이후 테스트 설정을 원래 값으로 복원. S3 |
+
+별도 테스트 API·DB·Secret·PVC/PV를 사용하고 모두 정리했다. 운영 설정·Secret은 전후 동일, 운영 readyz·외부 health는 정상이다. 기존 RUNBOOK의 API 재시작 후 승인/반려 HTTP 200·재호출 409 검증도 별도 근거다. 메모리 모드 재시작 후 410 실험을 수행했다고 확대하지 않는다.
+
+#### 4단계 · 워커·생성기·프로브
+
+| ID / 고장 | 예상 증상 | 실제 결과·비교 | 처음 확인할 곳 | 복구·원복 / 근거 |
+| --- | --- | --- | --- | --- |
+| 4-1 liveness=readyz + DB 중지 | API 재시작 반복 | **일치.** 테스트 DB 중지 후 liveness 실패·API restart=2·Killing Events | API restart 수·probe Events·DB 상태 | 테스트 DB와 API probe 복원. `API_PROBE_AND_DB_RESTORED`. S4 |
+| 4-2 워커 liveness 5초·1회 | 처리 지연 중 재시작 | **조건 명시.** 조사 지연 20초·heartbeat stale=3초를 추가해 HTTP 503·restart=2 재현. 실제 LLM 지연 자체를 측정한 것은 아님 | worker health·heartbeat 경과·probe Events·처리 시간 | 지연 주입·heartbeat·probe를 테스트 기준으로 복원. 운영 stale=180초에서 5초·1회만으로 같은 결과를 보장하지 않음. S4 |
+| 4-3 worker replicas=0 | 오류 없이 new 적체 | **일치.** 워커 Pod 0, 생성기 동작 중 new=1→6 증가 | `get deploy worker`, `/stats`·생성기 로그 | 테스트 워커 복원 후 new=0·pending_approval=7, queue drain 확인. 이전 RUNBOOK의 단일 경보 검증보다 추가 관측. S4 |
+| 4-4 잘못된 OpenAI 키 | 실제 모델 인증 401·경보 failed | **일치.** 실제 chat/completions에서 401 Unauthorized, 시험 경보 stage4-key가 failed | worker 로그·FAKE_LLM 여부·해당 alert 상태 | 잘못된 키 제거·가짜 LLM 테스트 기준 복원·재시도 후 pending_approval, attempts=2. 이 복구를 유효한 실제 키의 모델 재호출 검증으로 세지 않음. 운영 실제 키는 유지. S4 |
+| 4-5 처리 중 worker Pod 삭제 | 작업 재선점·체크포인트 재개 | **조건 명시.** 기본 유예에서는 원래 워커가 완료·attempts=1. 종료 유예 1초로 중단하면 새 worker가 judge 체크포인트부터 이어 처리·attempts 1→2·pending_approval | 같은 alert_id의 worker/owner·lease·attempts·Postgres state·resume 로그 | 시험 lease=20초 조건에서 재개 확인. 이후 지연·lease·종료 유예 복원. 운영 기본 lease의 복구 시간이나 모든 중복 실행 방지를 입증한 것은 아님. S4 |
+
+테스트 워커·생성기·API·DB·Secret·ConfigMap·인덱스·템플릿·PVC/PV를 정리했다. 운영 spec/Secret 비교 동일, 운영 서비스 1/1·PVC Bound·readyz true·KB 121개·외부 health 200을 확인했다. Pod 삭제가 항상 강제 중단이라는 예상은 실제 graceful 종료 결과를 반영해 보완한다.
+
+#### 5단계 · Ingress
+
+| ID / 고장 | 예상 증상 | 실제 결과·비교 | 처음 확인할 곳 | 복구·원복 / 근거 |
+| --- | --- | --- | --- | --- |
+| 5-1 Ingress host 오타 | 404 page not found | **일치.** 별도 테스트 Ingress의 host 변경 → 기존 host 요청 404, 잘못 설정된 새 host 요청은 200 | DNS·TCP 80 → Ingress host/path | 정상 host 복원 → 200. 운영 Ingress 유지. S5 |
+| 5-2 Service selector 오타 | 안내는 endpoint 없음·502 | **예상과 다름.** 실제 endpoint=[]·HTTP 503 `no available server` | EndpointSlice의 주소/ready·Service selector·Pod labels | selector 복원 → HTTP 200. 당시 Traefik allowEmptyServices=true. S5 |
+| 5-3 노트북 IP의 TCP 80 임시 차단 | HTTP 없이 타임아웃 | **일치.** 승인 후 임시 DROP, HTTP 응답 없이 4.0초 timeout. 차단 중 backend 직접 요청은 200 | 외부 TCP/HTTP 검사·임시 DROP 규칙 카운터·UFW 상태 | DROP 제거 후 200, UFW 규칙 동일·복구 타이머/규칙 정리. 공유 가비아 보안 그룹 유지. S5 |
+| 5-4 readiness 항상 실패 | 안내는 Running 0/1·502 | **예상과 다름.** Pod Running·Ready 0/1·endpoint ready=false, 외부 HTTP 503. readiness probe는 404로 실패·restart 0 | Pod READY·probe Events·EndpointSlice ready | readiness 복원 후 rollout 성공·HTTP 200. S5 |
+
+테스트 Ingress·Service·Deployment·방화벽 규칙·복구 타이머를 모두 정리했다. 운영 spec 전후 동일·공인 health 200이다. **이 환경의 ‘사용 가능한 backend 없음’은 503**이었으므로 502로 맞추기 위한 Traefik 변경은 하지 않았다. 7단계 Pod 전환 때 관측된 일시적 502와 구분한다.
+
+#### 6단계 · setup·KB 적재 Job
+
+| ID / 고장 | 예상 증상 | 실제 결과·비교 | 처음 확인할 곳 | 복구·원복 / 근거 |
+| --- | --- | --- | --- | --- |
+| 6-1 Job OpenSearch 주소 오타 | 재시도 후 BackoffLimitExceeded | **조건 명시.** 별도 연결 검사 Job에서 잘못된 DNS 주소 → NameResolutionError, 실패 Pod 2개·BackoffLimitExceeded. KB 전체 적재가 아니라 get_client().cluster.health() 연결 경로를 시험 | 각 시도 Pod 로그·Job conditions·initContainer와 본 작업 구분 | 정상 주소의 새 연결 Job Complete, `OPENSEARCH_CONNECTION_RESTORED yellow`. 운영 클러스터의 기존 yellow와 연결 실패는 구분. S6 |
+| 6-2 hi_res·limit 512Mi | OOMKilled | **일치.** 실제 `soc.kb.ingest --dry-run --strategy hi_res` 실행 → 종료 reason=OOMKilled·exitCode=137 | Pod state/Last State·reason/exit code | 정상 기준 fast·4Gi의 새 dry-run Job Complete·PDF 9종/121청크. 파싱 방식과 limit을 함께 복원했으므로 hi_res가 4Gi에서 성공한다는 검증은 아님. S6 |
+| 6-3 완료 Job template 수정 후 apply | field is immutable | **일치.** 테스트 Job 완료 후 명령 변경 → exit 1·`spec.template: field is immutable` | apply 오류의 필드·기존 Job 상태 | 거부된 apply는 기존 Job을 변경하지 않음. 테스트 Job 삭제·재생성 후 `immutable-job-version-2` 출력·Complete. S6 |
+
+테스트 Job 5개와 관련 Pod를 제거했고 `TEST_RESOURCES_REMAINING []`를 확인했다. 운영 setup·kb-ingest는 원래 Complete 1/1·spec 동일, KB count=121·테스트 인덱스 없음·운영 readyz true·공인 health 200이었다. 복구 dry-run은 재임베딩·운영 인덱스 재적재가 아니다. Job TTL 후 현재 리소스가 없어져도 이 원본 실행 결과를 근거로 삼는다.
+
+#### 7단계 · CI·배포·롤백
+
+| ID / 고장 | 예상 증상 | 실제 결과·비교 | 처음 확인할 곳 | 복구·원복 / 근거 |
+| --- | --- | --- | --- | --- |
+| 7-1 시작 직후 죽는 이미지 배포 | rollout 미완료·기존 Pod 서비스 유지 | **일치.** 실제 테스트 이미지를 빌드·노드에 적재해 배포. CMD가 즉시 exit 42 → Error·CrashLoopBackOff·restart 3. rollout 45초 대기는 exit 1·timeout. 정상 이전 Pod는 1/1 유지 | 새 Pod containerStatuses·logs --previous, rollout history·Service health | 먼저 정상 테스트 revision 1로 undo → 새 revision 3, 정상 health 확인까지 1.02초. 테스트 Service·운영 공인 health 각각 19/19 HTTP 200. 이후 테스트 Deployment/Service/Pod·이미지·아카이브 제거. S8 |
+| 7-2 workflow의 packages: write 제거 | GHCR push 권한 거부 | **일치(오류 문구 차이).** 임시 브랜치 workflow에서 write를 제거하고 packages: read만 부여. Actions 권한 표시는 Packages: read. 로그인·이미지 빌드 성공 후 실제 push에서 `error from registry: installation not allowed to Write organization package`, exit 1 | [missing_package_write 작업 로그](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44464284446/job/135358196368)의 token permissions·실패 step | 임시 workflow 브랜치 삭제. 운영 main의 원래 workflow·packages: write·commit ff435da는 변경 전후 동일. 실패한 테스트 push를 정상 게시로 기록하지 않음. 기존 package Actions 접근 403과 다른 직접 주입 실험. S8 |
+| 7-3 이미지 저장소 이름에 대문자 | repository name must be lowercase | **일치.** Actions에서 `ghcr.io/leedongwon9812/EDR-AI-TRIAGE-LAB1:uppercase-drill-...`로 docker build → invalid tag·`repository name must be lowercase`·exit 1 | [uppercase_image_name 작업 로그](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44464284446/job/135358195892)의 이미지 이름·빌드 오류 | 소문자 이름으로 별도 로컬 빌드 성공 확인 후 테스트 이미지 삭제. 원격 임시 브랜치 삭제·운영 이미지/워크플로 유지. S8 |
+
+**S8의 실제 실행과 복구 범위:** 즉시 죽는 이미지는 기존 앱 이미지를 기반으로 새 CMD를 넣어 별도로 빌드한 `docker.io/library/stage7-crash-drill:20261119051837`이다. 이미지 이름만 없는 상태나 정상 이미지의 실행 명령을 Pod에서 덮어쓴 시험이 아니다. GHCR 게시 없이 노드 containerd에 임시 import하고 imagePullPolicy=Never로 실행했다. 별도 테스트 Deployment `stage7-process-drill-20261119051837`는 maxUnavailable=0·maxSurge=1, BACKEND=memory·FAKE_LLM=true였고 운영 DB·모델 키를 사용하지 않았다.
+
+```text
+FAULT_ROLLOUT_EXIT 1 ... timed out waiting for the condition
+lastState.terminated: reason=Error exitCode=42
+state.waiting.reason=CrashLoopBackOff restartCount=3
+STAGE7_INTENTIONAL_STARTUP_CRASH exit=42
+deployment.apps/stage7-process-drill-20261119051837 rolled back
+deployment "stage7-process-drill-20261119051837" successfully rolled out
+RESTORED_HEALTH HTTP 200 backend=memory
+HEALTH_SAMPLES_ALL_200 19
+```
+
+복구 1.02초는 **undo 실행부터 정상 rollout·health 확인까지**이며 고장 관찰 45초를 포함한 총시간이 아니다. 기존 Pod가 계속 실행 중이어서 짧은 시간에 복구됐다. 19회는 약 2초 간격의 표본이며 모든 순간·모든 부하의 무중단 보장은 아니다.
+
+권한·이름 시험은 임시 브랜치 `stage7-fault-drill-20261119051837`의 `.github/workflows/ci.yml`에 한정했다. 운영 main·dongwon과 로컬 workflow, Environment 승인 규칙·Secrets는 변경하지 않았다. 두 Actions job과 실행 전체는 **의도한 고장 때문에 failure**로 보존했다. continue-on-error로 성공 처리하지 않았으며 운영 환경으로 배포하는 job도 두지 않았다.
+
+원복 확인: 임시 브랜치 삭제, main commit·workflow 원문 동일 및 packages: write 유지, 테스트 Deployment/Service/Pod 잔여 없음, 서버·로컬 테스트 이미지와 tar 제거를 확인했다. 운영 API·워커·생성기·OpenSearch·Postgres·Service·Ingress·ConfigMap spec 해시는 실습 전후 동일했다. 운영 Deployment 3개는 각각 1/1, PVC 2개는 Bound, readyz의 ready/opensearch/postgres 모두 true, KB 121개·공인 health 200이었다. 운영 이미지 게시·배포 재실행은 필요하지 않았으며 OS·방화벽·운영 Secret은 변경하지 않았다.
+
+**기존 S7 결과도 보존:** 이전의 존재하지 않는 태그 주입은 [44461056039](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44461056039)에서 정상 13→고장 14→undo 후 15, 주입~복구 48초·외부 23/23 HTTP 200으로 검증했다. 당시 운영 API imageID는 게시 digest와 일치했고, 기존 리포트·승인 대기 체크포인트도 확인했다. 별도 [정상 배포 44460914705](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44460914705)는 success·외부 11/11 HTTP 200이었다. S8 테스트 Deployment revision 1/3과 운영 API revision 13/15를 혼동하지 않는다.
+
+#### 예상하지 못한 문제와 예상이 달랐던 지점
+
+| 사례 | 실제 증상·확인 근거 | 조치·결과 | 다음에 처음 확인할 곳 |
+| --- | --- | --- | --- |
+| GHCR 계정과 대상 namespace 불일치 | 실제 토큰 계정 ldw1147, 게시 대상 leedongwon9812 → create_package 거부. RUNBOOK 1단계 | 올바른 계정으로 로그인 후 게시 완료. 이어 발생한 별도 denied는 재빌드 후 해결했으나 provenance 단독 원인이라고 확정하지 않음 | 실제 로그인 계정·토큰 권한·대상 namespace. 토큰 값은 출력하지 않음 |
+| Actions는 로그인됐지만 GHCR 조회 403 | packages: write가 있어도 기존 패키지 Actions 접근이 막혀 build 실패·deploy 미실행 | 사용자가 Manage Actions access 설정 후 같은 실행 재시도에서 게시 통과 | 실패 step·package 저장소 연결/Actions 접근·workflow 권한 |
+| maxUnavailable=0인데 순간 외부 502 | 초기 배포 외부 표본 1회 502, 내부 health/ready는 정상. 경로 갱신과 Pod 종료의 시간차로 추정. RUNBOOK 7단계 | 외부 게이트가 실행 실패 처리·이전 정상 revision 복구. minReadySeconds 10초·preStop 10초·종료 유예 45초 보강 후 정상 배포 11/11·실습 23/23 HTTP 200 | 외부 health 타임스탬프와 Pod 종료·EndpointSlice/Ingress 갱신 시점 대조. Pod Ready만으로 외부 무중단 판단하지 않음 |
+| KB Job Complete인데 스캔 PDF 누락 | 첫 dry-run에서 06번 요소·청크 0개. 전체 Job 종료 성공은 문서 내용 성공과 달랐음. RUNBOOK 6단계 | 사용자 승인으로 fast 결과가 비면 OCR fallback. 9종 121청크 적재, 그러나 한글 손상·k10 실패는 남음 | 출처별 청크/텍스트 길이·OCR 결과·해당 문항 검색 결과 |
+| 저장돼 있어도 원하는 문서를 못 찾음 | 서버 검색 평가에서 k10·k13·k14 실패, hybrid 18/21. 영어 문서·OCR 문제가 남아 있음 | 적재 성공과 검색/답 품질을 분리. 고도화 후보로 남김; 해결 완료로 표시하지 않음 | 실패 문항별 top-k·출처·원문/청크. 서버 적재 성공 수만 보지 않음 |
+
+#### D3-10 결론과 남은 범위
+
+1. **실습 반영:** 1~6단계 25개 항목과 7단계 추가 3개, 총 28개 항목의 주입·복구 결과를 반영했다. 조건을 추가한 시험과 안내와 달랐던 증상은 각각 명시했다.
+2. **예상과 달랐던 점:** 사용 가능한 Ingress backend가 없으면 이 환경에서는 502 대신 503이었다. 워커는 기본 종료 유예에서 기존 프로세스가 완료했고, 1초 유예 중단에서만 새 워커 재개를 관측했다. single-node OpenSearch의 커널 검사는 강제 검사 조건을 명시해야 한다.
+3. **원복 확인:** 1~6단계의 리소스·데이터·임시 설정 정리와 커널 262144·임시 DROP 제거·타이머 정리는 과거 세션 출력으로 확인했다. 이번 7단계 추가 실습은 실제 undo와 리소스·이미지·원격 브랜치 삭제, 운영 설정 동일·서비스 정상을 새로 확인했다.
+4. **범위 구분:** 7단계는 기존 image pull 실패뿐 아니라 실제 프로세스 즉시 종료·workflow 쓰기 권한 부족·대문자 이름 거부까지 직접 검증했다. 기존 package 접근 403·외부 502는 별도 장애다. 테스트 환경과 표본 결과를 모든 운영 장애의 무중단 보장으로 확대하지 않는다.
+5. **공동 작업:** 개인별 장애 주입·복구 기록을 정리했지만 역할을 바꾼 블라인드 종합 드릴, 진단 후 나눔·교차 리뷰 완료를 대신하지 않는다. 이 공동 작업은 기존 기록상 미완료다.
+6. **평가와 분리:** D3-10 문서 보완은 완료했다. D3-8 최종 성능 평가·고도화 효과 측정은 별도이며 이번 표에 새 평가 수치를 채우지 않았다. 이후 발견한 고장은 관측일·원인·복구 근거와 함께 추가한다.
 
 ## 셀프 체크
 
