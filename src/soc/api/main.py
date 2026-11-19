@@ -14,11 +14,14 @@
 from __future__ import annotations
 
 import logging
+import secrets
 from contextlib import asynccontextmanager
 from functools import lru_cache
+from typing import Annotated
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from langgraph.types import Command
 from pydantic import BaseModel
 
@@ -49,7 +52,25 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="EDR AI 트리아지 API", version="1.0", lifespan=lifespan)
-app.include_router(dify_router)
+app.include_router(dify_router, include_in_schema=False)
+
+triage_bearer = HTTPBearer(
+    auto_error=False, scheme_name="TriageAPIKey",
+    description="유료 트리아지 전용 API 키. 무료 조회·승인에는 필요하지 않습니다.",
+)
+
+
+def require_triage_key(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(triage_bearer)],
+) -> None:
+    configured = settings.triage_api_key.get_secret_value()
+    if not configured:
+        raise HTTPException(503, "트리아지 API 키가 설정되지 않았습니다")
+    if credentials is None or not secrets.compare_digest(
+        credentials.credentials.encode("utf-8"), configured.encode("utf-8"),
+    ):
+        raise HTTPException(401, "유효한 트리아지 API 키가 필요합니다",
+                            headers={"WWW-Authenticate": "Bearer"})
 
 
 @lru_cache(maxsize=1)
@@ -62,7 +83,7 @@ def healthz():
     return {"status": "ok", "backend": settings.backend}
 
 
-@app.get("/readyz")
+@app.get("/readyz", include_in_schema=False)
 def readyz():
     checks = {"opensearch": False, "postgres": pg_ping()}
     try:
@@ -99,7 +120,7 @@ def report(alert_id: str):
     return r
 
 
-@app.post("/alerts/{alert_id}/triage")
+@app.post("/alerts/{alert_id}/triage", dependencies=[Depends(require_triage_key)])
 def triage_now(alert_id: str):
     from ..worker import process
 
@@ -130,9 +151,13 @@ def approve(alert_id: str, d: Decision):
     if a["status"] != "pending_approval":
         raise HTTPException(409, f"승인 대기 상태가 아닙니다 (지금: {a['status']})")
     g, cfg = graph(), run_config(alert_id)
-    if not g.get_state(cfg).next:
+    checkpoint = g.get_state(cfg)
+    if not checkpoint.next:
         # 수첩(체크포인터)에 멈춘 지점이 없음: 메모리 저장이었는데 프로세스가 재시작된 경우 등
         raise HTTPException(410, "저장된 진행 상황이 없습니다. 체크포인터가 메모리였나요? (2일차 1-3 실험)")
+    if checkpoint.next != ("approval",) or not checkpoint.interrupts:
+        # 무인증 승인이 조사·판정 같은 유료 노드를 재개하는 경로가 되지 않게 한다.
+        raise HTTPException(409, "승인 노드에서 대기 중인 진행 상황이 아닙니다")
     out = g.invoke(Command(resume=d.model_dump()), cfg)
     save_report(out["report"] | {"status": "completed"})
     update_alert(alert_id, status="completed")

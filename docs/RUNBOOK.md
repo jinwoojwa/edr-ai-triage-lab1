@@ -371,11 +371,134 @@ Pod template annotation `soc.lab/commit`·OCI revision label은 전체 SHA, 이�
 
 ### 실제 원격 실행 기록
 
+#### 첫 배포의 외부 502 감지 및 자동 복구
+
+GHCR package Actions 접근 설정을 사용자가 반영한 후 run `44459930637` attempt 2에서 게시가 통과했다. SHA `0f6430a`, digest `sha256:3340d4cbcd69d0ca41f6e7ca7c4bbe0491426dd32306bd687945055e4a9cde98`의 새 Pod를 확인했다. revision 8→9 정상 배포, 존재하지 않는 태그의 ImagePullBackOff, 기존 Ready Pod 유지, 정상 revision 9로 undo(새 revision 11)까지 48초에 완료했다.
+
+그러나 외부 health 표본에 `2026-11-19T04:46:33Z 502`가 1회 있어 전체 실행을 실패 처리했다. 실패를 무시하지 않고 이전 정상 revision 8로 추가 복구(새 revision 12)했고 내부 health/ready를 재확인했다. 따라서 이 실행은 CI/CD 최종 성공으로 세지 않는다. 배포 후 외부 검사 실패 경로의 자동 rollback과 실패 상태 보존은 검증됐다.
+
+502 시각이 초기 Pod 교체 구간과 일치해 API 종료와 Ingress endpoint 갱신의 시간차를 원인으로 의심한다. 허용된 `11-api.yaml`에 minReadySeconds=10, preStop의 Python sleep 10초, terminationGracePeriodSeconds=45를 추가했다. 새 Pod가 안정적으로 Ready인 동안 기존 Pod를 유지하고, 이후 종료되는 Pod가 경로 변경 전파 시간 동안 요청을 받을 수 있게 한다. 기존 Pod에는 새 lifecycle이 소급되지 않으므로 첫 전환과 이후 전환을 실제 외부 관측으로 구분한다. 검사를 완화하지 않고 후속 정상 배포·롤백 실습을 다시 수행한다. [Kubernetes 종료 절차](https://kubernetes.io/docs/concepts/workloads/pods/pod-termination/)
+
 사용자가 전용 SSH 키 등록과 dongwon·main 게시(기존 32커밋 포함)를 승인했다. CI 전용 ed25519 공개 키만 ubuntu authorized_keys에 restrict 옵션으로 추가했고, 전용 키의 SSH·sudo k3s 조회를 확인했다. 기존 개인 키는 업로드하지 않았다. GitHub Environment soc에 main branch 제한·required reviewer와 네 SSH Secrets를 등록했다. OS·UFW·가비아 보안 그룹·기존 클러스터 Secret은 변경하지 않았다.
 
-현재 상태: 로컬 테스트 67개 통과, JUnit 필수 통합 테스트·skip 0 확인, actionlint 1.7.12·bash -n·ShellCheck warning 이상 검사·embedded Python 구문·git diff --check 모두 통과했다. 서버 read-only 사전 점검에서 python3·flock·sudo k3s kubectl 사용 가능, API 1/1, PVC 20Gi·10Gi Bound였다. 원격 게시·배포·고장 복구는 승인 및 실제 실행 대기다. workflow URL·신규 SHA/digest·revision·복구 시간은 아직 없다. 교차 진단 나눔과 옆 팀 검증도 미완료다.
+로컬 테스트 67개, JUnit 필수 통합 테스트·skip 0, actionlint 1.7.12·bash -n·ShellCheck warning 이상 검사·embedded Python 구문·git diff --check를 통과한 뒤 실제 Actions에서도 검증했다. 서버 사전 점검에서 python3·flock·sudo k3s kubectl 사용 가능, API 1/1, PVC 20Gi·10Gi Bound였다.
 
-`11-api.yaml`의 소스 기본 이미지는 현재 실행 중인 유효한 수동 태그를 유지한다. CI가 이 파일을 읽고 테스트한 새 SHA tag@digest로 렌더링한 결과만 적용한다. 아직 게시되지 않은 SHA를 기본값으로 적어 수동 apply 시 pull 오류가 생기게 하지 않는다. 이후에도 CI 적용 결과를 이 기본 파일로 덮어쓰지 않는다.
+#### 보강 후 정상 배포와 롤백 실습: 완료
+
+| 항목 | 실제 결과 |
+| --- | --- |
+| 배포 코드 | `d202ee9614f69637eeee34b879579b7d5835dfe6` |
+| 이미지 | `ghcr.io/leedongwon9812/edr-ai-triage-lab1:d202ee9` |
+| digest / Pod imageID | `sha256:7a80be112acc36658e1a635f8f15b2177dce8bf0b75634203bd632e7a033fb83`로 일치 |
+| 정상 main push | [44460914705](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44460914705), test/build/deploy success |
+| CI 실제 DB 테스트 | 67 passed in 3.60s, skip 0·필수 Postgres 재개 테스트 확인 |
+| 정상 rollout | 이전 revision 12 → 새 revision 13, 내부 healthz·readyz 통과 |
+| 외부 정상 배포 표본 | 11/11 HTTP 200 |
+| 수동 고장 실습 | [44461056039](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44461056039), test/build/deploy success |
+| 동일 SHA 재실행 | 기존 이미지 전체 commit label 확인·digest 재사용, build-push skip |
+| 고장 | revision 14, `drill-d202ee9-missing` → ErrImagePull/ImagePullBackOff·rollout 미완료 |
+| 서비스 유지 | 정상 `api-d446d584d-fk5gh` 1/1 유지, 실패 Pod `api-85b8589f6f-ph2fv`만 0/1 |
+| 복구 | 정상 revision 13으로 undo → 최종 revision 15 |
+| 복구 시간 | 주입부터 정상 확인까지 48초, 의도한 실패 대기 45초 포함 |
+| 외부 고장 실습 표본 | 23/23 HTTP 200 |
+
+실제 로그의 핵심 출력:
+
+```text
+PREVIOUS_REVISION=13
+DEPLOYED_REVISION=13
+DRILL_RECOVERY_SECONDS=48
+ROLLBACK_DRILL_PASSED
+DEPLOY_SUCCEEDED image=ghcr.io/leedongwon9812/edr-ai-triage-lab1:d202ee9@sha256:7a80be112acc36658e1a635f8f15b2177dce8bf0b75634203bd632e7a033fb83 commit=d202ee9614f69637eeee34b879579b7d5835dfe6 revision=15
+PUBLIC_HEALTH_PASSED 23 samples
+```
+
+외부 표본은 약 2초 간격이며 모든 순간·모든 부하의 무중단 보장은 아니다. 초기 실패 실행은 failure로 보존했고 성공으로 바꾸지 않았다. 수정 후 두 실행은 success다. `dongwon` push는 test 성공 뒤 build/deploy가 skip되어 브랜치 제한도 확인했다. 문서만 변경한 후속 기록 커밋은 CI paths-ignore 대상이므로 실행 이미지의 코드 SHA는 계속 d202ee9다.
+
+#### 데이터·설정 보존과 정리
+
+배포 직전/최종 관측에서 경보 1919→1932, 리포트 1919→1932, 체크포인트 16037→16141이었다. 생성기·워커가 계속 실행 중이므로 증가한 값이며 CI가 합성 경보를 추가한 것은 아니다. KB 후보는 121개로 유지됐다. 기존 `llm-live-20261119-approve`·`llm-live-20261119-reject` 리포트 조회는 모두 HTTP 200이다. `al-f75e6b7d790d`는 pending_approval이고 새 프로세스가 Postgres에서 next=[approval]·interrupts=1을 읽었다. 승인/반려 결정을 새로 제출하지 않았다.
+
+최종 API Pod Ready 1/1·restart 0, worker·generator Ready 1/1, OpenSearch·Postgres 정상, PVC 이름·volume 및 Bound 상태 유지다. `FAKE_LLM=false`, `KB_TOOLS=real`, `TELEMETRY_TOOLS=real`, `BACKEND=real`, `CHECKPOINTER=postgres`를 확인했다. DB·PVC·클러스터 Secret·ConfigMap·Ingress·OS·방화벽은 변경하지 않았다. 승인된 SSH 공개 키와 GitHub Environment 설정만 추가했다. 고장 Pod는 undo로 제거됐고 워크플로 임시 파일은 cleanup했다. 로컬 CI용 Docker 컨테이너 2개도 제거했다.
+
+API 교체로 종료된 port-forward를 숨김 프로세스로 다시 연결했고 localhost:18002의 healthz·readyz·docs 모두 HTTP 200이다. 외부는 계속 Exact /healthz만 공개한다. 검증용 로컬 전용 키 파일은 제거했으며 의도한 GitHub Environment Secret·서버 공개 키 등록은 유지한다. 최종 Deployment의 minReadySeconds·preStop·종료 유예·revision 15·digest도 실제 조회해 대조했다. 실행 로그·test-results·deployment-evidence는 위 Actions에서 확인한다. 교차 진단 나눔과 옆 팀 검증은 미완료다.
+
+`11-api.yaml`의 소스 기본 이미지는 최초 CI 구성 시점의 유효한 수동 태그를 보존한다. CI가 이 파일을 읽고 테스트한 새 SHA tag@digest로 렌더링한 결과만 적용한다. CI 이후 이 소스 파일을 그대로 수동 apply하면 이전 이미지로 되돌아가므로 사용하지 않는다. 운영 배포는 workflow 또는 검증한 tag@digest를 렌더링하는 절차로 진행한다.
+
+## 외부 docs/API 공개 — 유료 호출만 인증 (2026-11-19)
+
+### 범위·승인·로컬 검증
+
+사용자 지정 10개 파일에 작업했고, 추가 승인으로 `tests/test_checkpoint_postgres.py`에 테스트 전용 TRIAGE_API_KEY와 트리아지 Bearer 헤더만 추가했다. 기존 테스트는 새 인증 정책 때문에 503으로 실패했으며 가짜 LLM 모드의 인증 우회로 해결하지 않았다. 새 API 테스트 23개와 기존 67개를 격리 로컬 OpenSearch 2.19.0(19270)·Postgres 16(15470)에서 실행해 **90 passed in 12.35s, skip 0**을 확인했다.
+
+```powershell
+# 운영과 분리된 일회성 테스트 서비스 사용
+$env:OPENSEARCH_URL='http://127.0.0.1:19270'
+$env:POSTGRES_DSN='postgresql://soc:ci-only-password@127.0.0.1:15470/soc'
+.\.venv\Scripts\python.exe -m pytest -q --ignore=tests/test_dify.py
+```
+
+새 테스트는 무키·틀린 키·잘못된 scheme이 401이며 graph/모델·경보 조회/변경을 하지 않는지, 서버 키 미설정 시 triage만 503인지, 공개 route의 무인증 200과 OpenAPI의 operation별 security를 확인했다. 실제 LangGraph 승인 interrupt를 만든 뒤 LLM·검색·query embedding 함수를 실패 stub으로 바꿔 승인/반려 모두 추가 호출 없이 완료됨을 검증했다. 승인 외 다음 단계는 409, 상태 없음은 410으로 거절한다.
+
+### Secret·인증서 준비
+
+사용자가 전용 키 Secret 등록과 cert-manager v1.21.3 설치·ACME/TLS Secret 생성을 승인했다. 공식 지원표의 상한 1.36보다 높은 k3s 1.37에서 실습 검증하는 조건이며 호환 실패 시 이번 설치를 복구하기로 했다. 기존 Secret은 값 대신 키 이름/해시로 보존 상태를 비교한다.
+
+TRIAGE_API_KEY는 무작위 전용 키를 메모리에서 생성하고 SSH stdin → 서버 kubectl merge patch로 기존 soc-app-secrets의 해당 항목만 추가했다. 값은 로그·명령 인자·파일에 남기지 않았다. 최초 로컬 `--patch-file -`는 파일 읽기 오류로 반영되지 않았으며 `/dev/stdin`으로 재시도해 등록했다. API는 새 이미지 배포에서 환경변수를 읽고 worker는 재시작하지 않는다.
+
+공식 release manifest v1.21.3의 SHA-256 `c04a51295adda2b1a775146751f973e787190778c7f35180861d9678876e5c74`를 GitHub asset digest와 대조해 설치했다. controller·cainjector·webhook Pod 기동과 webhook rollout을 확인했다. 51-tls.yaml은 server dry-run을 통과한 뒤 Issuer letsencrypt-soc·Certificate soc-public·Middleware public-https-redirect를 생성했다. ACME 이메일은 선택 항목이며 미지정이다. 신뢰된 인증서가 준비되기 전 업무 경로는 열지 않는다.
+
+### 배포·인증서·외부 검증: 완료
+
+인증 이미지부터 CI로 배포하고 내부에서 무키/잘못된 키 401·정상 키로 미존재 ID 404·operation별 schema를 확인한 뒤 50-ingress.yaml을 적용했다. 인증 없는 이전 API를 업무 경로로 공개하지 않았다. 외부 브라우저 Swagger에서 무인증 `/stats` → Try it out → Execute로 실제 200을 확인했다. 호출할 수 없는 내부 readyz를 공개 schema에서도 숨긴 보강까지 최종 이미지로 다시 배포했다.
+
+| 항목 | 실제 결과 |
+| --- | --- |
+| 초기 인증 배포 | [44466767080](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44466767080), SHA 7e355d4, test/build/deploy success |
+| 최종 배포 | [44467318306](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44467318306), SHA `5453787dcd09157c6a2817a562de108599d44ed5`, test/build/deploy success |
+| GitHub runner 테스트 | 90 passed in 3.81s, 0 skipped, 필수 Postgres 통합 테스트 실행 |
+| API 이미지 | `ghcr.io/leedongwon9812/edr-ai-triage-lab1:5453787@sha256:6b09c25879361c4598a8d12027d93cfdbca0c4f345266752f32a511e58f066ce` |
+| rollout | revision 16→17, 새 Pod Ready 1/1·restart 0, 게시 digest 대조 |
+| CI 기존 HTTP health | PUBLIC_HEALTH_PASSED 13 samples |
+| cert-manager | v1.21.3, controller·cainjector·webhook 각 1/1 |
+| Certificate / Order | soc-public Ready=True·revision 1, ACME Order valid |
+| 인증서 | Let's Encrypt YE2, SAN soc.1.201.110.16.nip.io, 기본 CA/호스트명 검증 통과·-k 미사용 |
+| 만료 / 갱신 예약 (UTC) | 2027-02-17 04:40:16 / 2027-02-02 04:40:16 |
+| 공개 HTTPS | healthz·docs·openapi.json·alerts·approvals·stats 무인증 200 |
+| 인증 거절 | 무키 401·틀린 키 401, 실행 전 테스트 경보 상태 불변 |
+| 제외 경로 | 외부 readyz·dify/retrieval 404, 공개 schema에서도 제외 |
+| HTTP | 기존 healthz 200, docs는 HTTPS로 301 이동 |
+
+CertificateRequest already exists 일시 경고 후 인증서 발급은 자동 완료됐다. 공식 지원표 범위 밖의 k3s 1.37에서 이번 설치·webhook·발급·외부 TLS가 동작함을 확인한 것이며 공식 지원 보증은 아니다. 갱신은 예약 상태를 확인했으며 미래 실행까지 실증한 것은 아니다. 만료 전 Certificate Ready·renewalTime·controller 로그를 점검한다. cert-manager 사용량은 관측 당시 controller 25Mi·cainjector 18Mi·webhook 10Mi, CPU 각각 1m이었다.
+
+### 외부 실제 모델 1건·무료 승인/반려
+
+외부 HTTPS로 `public-verify-ba0c8b6d30-triage` 1건에 정상 Bearer 키를 전달했다. 기존 합성 경보 복사본이며 worker가 선점하지 않도록 테스트 in_progress·미래 lease로 준비했다. 무키·틀린 키 401과 상태 불변 확인 후 인증 요청을 **한 번만** 전송했다. 타임아웃 자동 재시도는 없었다.
+
+HTTP 200·22.2초·malicious·pending_approval가 반환됐고 API 로그에서 실제 OpenAI chat 200 4회·query embedding 200 1회를 확인했다. 승인 대기 리포트는 요약이므로 추가 유료 호출 없는 정상 승인으로 완료한 뒤 전체 리포트·체크포인트 usage를 대조했다. 승인 전후 usage는 같았다.
+
+| 측정 | 값 |
+| --- | --- |
+| 유료 트리아지 HTTP 요청 | 1건; 내부 chat 호출 4회 |
+| 입력 / 출력 토큰 | 14251 / 964 |
+| 추정 chat 비용 | 0.002716 USD, 설정 단가 기준. query embedding·기존 worker 비용·실제 청구 총액과 별개 |
+| 권고 출처 | 02_playbook_credential_dump.pdf·08_analyst_notes_attack_en.pdf·09_response_matrix_complex_tables.pdf |
+| 판정 근거 | event_id 2개 |
+| 해당 테스트 건의 무인증 최종 승인 | 200, usage 증가 없음 |
+
+별도 승인·반려는 기존 `al-f75e6b7d790d`의 승인 대기 상태를 `public-verify-ba0c8b6d30-approve`·`...-reject`라는 새 thread에 복제해 approval 노드만 실행했다. 원래 경보에 결정을 제출하지 않았다. API 교체 전 Postgres에 준비한 두 상태를 최종 API가 읽어 외부 무키 POST 승인/반려 각각 200·approved=true/false, 재호출 각각 409를 확인했다. 복제된 두 건을 새 LLM 판정·추가 비용 사례로 세지 않으며 최종 정확도 평가표도 바꾸지 않는다.
+
+### 보존·정리와 사용 방법
+
+테스트 경보·리포트 3개와 해당 thread의 checkpoint_writes·checkpoint_blobs·checkpoints만 삭제했다. 테스트 checkpoint 잔여 0, 원래 al-f75e6b7d790d는 pending_approval 유지, KB 121개를 확인했다. PVC 두 개의 UID/PV와 기존 Secret 값의 해시는 동일했다. soc-app-secrets에는 TRIAGE_API_KEY만 추가했다. worker·generator·OpenSearch·Postgres는 이번 작업으로 재시작하지 않았다. 로컬 테스트용 public-ci-opensearch·public-ci-postgres도 제거했다.
+
+외부 주소는 **https://soc.1.201.110.16.nip.io/docs**다. 무료 API는 바로 Execute, 유료 트리아지는 Authorize에 전용 키 값만 입력한다. 허가된 관리자의 키 복사 명령은 DEPLOYMENT.md 7절에 있다. 실제 키·인증서 개인 키는 문서·Git·로그에 남기지 않았다. OS·UFW·공유 보안 그룹은 변경하지 않았다. API 교체 후 port-forward를 다시 연결했고 localhost:18002/docs·readyz도 200이다.
+
+승인된 11개 파일만 변경했다(기본 10개+추가 승인 테스트 파일). 미추적 외부접속 계획서는 게시하지 않았다. 문서 전용 결과 커밋은 CI paths-ignore 대상이며 실행 코드 SHA는 5453787이다. 사용자별 역할·요청량/비용 상한은 추가하지 않았으며 공유 키 사용자의 반복 호출·기존 worker 비용은 별개로 남는다. 옆 팀 교차 검증은 별도다.
+
+### 복구
+
+공개 후 실패하면 먼저 api-public-http·api-public-https Ingress를 삭제해 기존 health 전용으로 축소한다. 그다음 이전 정상 API revision을 복구한다. Secret·인증서는 image undo 대상이 아니다. 기존 OpenAI/DB 값은 보존하고 전용 키 회수·인증서 도구 정리는 영향 확인과 승인 범위에 따라 수행한다. cert-manager 삭제는 다른 인증서 사용 여부를 먼저 확인한다.
 
 ## 공통 1차 확인
 ```bash

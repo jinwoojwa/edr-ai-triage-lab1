@@ -5,6 +5,7 @@ metadata:
   namespace: soc
 spec:
   replicas: 1
+  minReadySeconds: 10
   revisionHistoryLimit: 5
   progressDeadlineSeconds: 240
   strategy:
@@ -20,6 +21,7 @@ spec:
       labels:
         app: api
     spec:
+      terminationGracePeriodSeconds: 45
       imagePullSecrets:
         - name: ghcr-pull
       containers:
@@ -27,6 +29,10 @@ spec:
           # CI replaces this deployed baseline with the tested SHA tag and digest.
           image: ghcr.io/leedongwon9812/edr-ai-triage-lab1:day2-stage1-8aab319
           imagePullPolicy: Always
+          lifecycle:
+            preStop:
+              exec:
+                command: ["python", "-c", "import time; time.sleep(10)"]
           ports:
             - name: http
               containerPort: 8000

@@ -217,7 +217,29 @@ Environment `soc`의 승인 후 기존 SSH 경로로 배포하며, known_hosts �
 
 이전 정상 revision을 기록하고 CI가 렌더링한 API 매니페스트만 dry-run·apply한다. 새 이미지의 Pod health/ready와 digest, 외부 health를 확인한다. 실패 시 원인 수정 전에 기록한 정상 revision으로 undo하며 복구 성공도 최초 실패를 성공으로 바꾸지 않는다. 자동 undo는 Kubernetes 자체 기능이 아니라 이번 스크립트의 동작이다. ConfigMap·Secret·DB는 undo 범위가 아니다.
 
-실제 Actions 게시·승인 배포·이미지 고장 및 복구 검증은 접속/게시 승인을 기다린다. 구현만으로 인프라 7단계 완료를 기록하지 않는다. 외부 공개는 `/healthz`만 유지한다. 옆 팀 검증과 기록 담당자 교차 리뷰는 미완료다.
+사용자 승인 후 전용 SSH 키·Environment를 등록하고 main에 게시했다. 외부 공개는 `/healthz`만 유지한다. 옆 팀 검증과 기록 담당자 교차 리뷰는 미완료다.
+
+첫 실제 실행에서 이미지 게시·새 digest 배포·고장 이미지 실패·48초 복구는 통과했지만 초기 교체 구간의 외부 502가 1회 관측됐다. 외부 게이트를 유지해 실행 실패 및 원래 revision 복구를 확인했다. 단순 maxUnavailable=0만으로 Ingress 갱신 시간차까지 제거했다고 주장하지 않는다. API 매니페스트에 minReadySeconds 10초·preStop 대기 10초·종료 유예 45초를 추가했다. 이는 승인된 API 파일 안의 워크로드 설정이며 서버 OS·방화벽 변경은 아니다.
+
+보강 커밋 `d202ee9`의 [main push 실행](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44460914705)은 test·build·deploy 모두 success였다. 테스트 67 passed·0 skipped, 새 digest와 Pod imageID 일치, revision 12→13, 외부 health 11/11 HTTP 200을 확인했다. [동일 SHA 수동 고장 실습](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44461056039)도 모두 success였다. 기존 SHA digest를 재사용하고 build-push 단계는 skip됐다. 고장 revision 14의 ErrImagePull/ImagePullBackOff 중 정상 Pod가 유지됐고, 정상 revision 13으로 undo해 최종 revision 15가 됐다. 고장 주입부터 복구까지 48초(의도한 rollout 실패 대기 45초 포함), 외부 표본 23/23 HTTP 200이었다. 이 두 관측으로 모든 상황의 무중단을 보증하지 않는다.
+
+최종 API는 `d202ee9@sha256:7a80be112acc36658e1a635f8f15b2177dce8bf0b75634203bd632e7a033fb83`, Ready 1/1·restart 0이며 real LLM/KB·Postgres 설정을 유지한다. KB 121개, PVC 2개, 기존 승인·반려 리포트 조회, 승인 대기 `al-f75e6b7d790d`의 실제 Postgres 체크포인트(다음 노드 approval·interrupt 1)를 확인했다. 인프라 7단계의 구현·게시·정상 배포·실패 감지·롤백 검증은 완료다. 최종 모델 품질 평가·교차 리뷰는 별도다.
+
+### 외부 docs/API 공개 — 비용 기준 인증 (2026-11-19)
+
+사용자는 합성 경보·조사 근거·리포트·승인 대기 공개를 허용했고 유료 호출에만 인증하도록 결정했다. 이에 docs/OpenAPI·조회·통계·승인/반려는 무인증, 트리아지 POST만 TRIAGE_API_KEY Bearer 인증으로 구현한다. 인증 실패는 조회·쓰기·모델 실행 전에 차단한다. 서버 키가 비어 있으면 해당 route만 503으로 닫힌다. 승인 API는 checkpoint.next=(approval,)·interrupt가 있어야 재개하므로 공개 승인이 유료 조사/판정을 다시 실행하는 통로가 되지 않는다.
+
+허용된 10개 파일에 더해 기존 Postgres API 재시작 테스트 1개 수정 승인을 받았다. 기존 무인증 트리아지 요청은 새 계약에서 503으로 실패했으며, 가짜 테스트 키와 Bearer 헤더만 추가했다. 이후 격리 OpenSearch 2.19.0·Postgres 16에서 Dify 제외 **90 passed, 0 skipped (12.35초)**였다. 신규 23개는 공개 route·인증 거절의 무부작용·승인/반려의 추가 모델/임베딩 호출 0을 검증했다. 실제 모델 품질 평가는 아니다.
+
+HTTPS는 Traefik·cert-manager로 제공하고 HTTP health는 기존 CI 때문에 200을 유지한다. docs·업무 HTTP만 HTTPS로 이동한다. Dify·readyz는 외부 경로에서 제외한다. 전역 / Prefix와 전역 로그인은 사용하지 않는다. cert-manager v1.21.3의 지원표는 1.36까지인데 현재 k3s는 1.37이므로 호환 확인 후 복구하는 조건의 설치 승인을 받았다. 실제 발급 결과·URL 확인은 RUNBOOK에 기록하며 공식 지원 여부와 구분한다.
+
+전용 Secret 추가·ACME/TLS Secret 생성은 승인받았다. OpenAI/DB Secret 값·OS·UFW·공유 보안 그룹은 유지한다. 키는 화면·Git에 출력하지 않는다. 공유 키에는 사용자별 신원·비용 상한·반복 호출 통제가 없고, 공개 승인자 이름도 신원 검증된 값이 아니다. 이 범위는 실습용 사용자 결정이며 별도 고도화와 구분한다.
+
+최종 [Actions 44467318306](https://github.com/leedongwon9812/edr-ai-triage-lab1/actions/runs/44467318306)은 90개 테스트·빌드·배포 모두 success, 코드 SHA 5453787·API revision 17이다. 게시 digest와 실제 이미지가 일치하며 HTTP health 표본 13개가 모두 200이었다. Certificate Ready·Order valid, Let's Encrypt SAN/신뢰 검증을 통과했다. 인증서 만료는 2027-02-17, 갱신 예약은 2027-02-02 UTC다. 이번 실습 발급 성공을 공식 호환성 보증이나 미래 갱신 성공으로 확대하지 않는다.
+
+외부 HTTPS docs·schema·조회 200, 무키/틀린 키 triage 401, Dify·readyz 404, docs HTTP→HTTPS 301을 확인했다. 브라우저 Swagger에서도 무인증 stats Execute가 200이었다. 인증 트리아지 1건은 22.2초·malicious·승인 대기였고 실제 chat 4회·embedding 1회를 호출했다. chat 토큰 14251/964·추정 0.002716 USD이며 전체 청구액은 아니다. 추가 유료 호출 없는 최종 승인으로 usage 동일을 확인했고 별도 복제 승인/반려도 무키 200·재호출 409였다. 이는 접속·인증 검증이며 최종 정확도 평가가 아니다.
+
+테스트 경보·리포트·체크포인트만 정리했고 원래 승인 대기·KB 121개·기존 PVC UID/PV·Secret 값은 보존했다. 외부 접속 목표는 완료했다. 변경 파일은 기본 10개와 승인된 Postgres 테스트 1개다. Ingress/TLS는 CI와 별도로 적용했으며 workflow·API Deployment·방화벽 파일은 추가 수정하지 않았다. 교차 리뷰는 미완료다.
 
 ### 평가: 기준점(2일차)과 최종(3일차)
 
